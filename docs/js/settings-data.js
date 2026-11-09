@@ -1,6 +1,6 @@
 // made by scripts/site_settings.py from mod.json: run it again after changing settings
 window.KOSMOS_DATA = {
- "version": "v3.6.0",
+ "version": "v3.8.0",
  "geode": "5.11.2",
  "gd": {
   "win": "2.2081",
@@ -458,6 +458,14 @@ window.KOSMOS_DATA = {
      "choices": []
     },
     {
+     "key": "timing-meter",
+     "name": "Timing meter",
+     "type": "bool",
+     "default": "Off",
+     "about": "A bar at the bottom of the screen in levels, like a rhythm game: every click leaves a mark. Left of the middle: how many frames early it was (green: saved, blue: a training hint, orange: not saved because of the save rate). The middle: on time. Right, in red: a click no delay could save. Presses leave tall marks, releases short ones.",
+     "choices": []
+    },
+    {
      "key": "training-mode",
      "name": "Training mode (hints only)",
      "type": "bool",
@@ -474,6 +482,14 @@ window.KOSMOS_DATA = {
      "choices": []
     },
     {
+     "key": "save-map",
+     "name": "Save map",
+     "type": "bool",
+     "default": "On",
+     "about": "Green marks on the top half of the progress bar where the buffer saved you in this level (brighter = more saves), next to the red death heatmap.",
+     "choices": []
+    },
+    {
      "key": "save-ding",
      "name": "Ding on save",
      "type": "bool",
@@ -487,6 +503,14 @@ window.KOSMOS_DATA = {
      "type": "bool",
      "default": "Off",
      "about": "Flashes the screen green every time the buffer saves one of your clicks.",
+     "choices": []
+    },
+    {
+     "key": "floating-button",
+     "name": "Floating button",
+     "type": "bool",
+     "default": "On on phones, off on PC",
+     "about": "A Saturn button over the level that opens the menu (the game pauses first). Drag it anywhere; it stays where you leave it. A tap on it doesn't make you jump. On by default on phones.",
      "choices": []
     },
     {

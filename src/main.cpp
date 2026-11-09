@@ -18,6 +18,7 @@
 #include <Geode/Geode.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/ui/MDTextArea.hpp>
+#include <Geode/ui/Notification.hpp>
 #include <Geode/modify/EffectGameObject.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/GameObject.hpp>
@@ -34,6 +35,7 @@
 #include <functional>
 #include <optional>
 #include <random>
+#include <cctype>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/RingObject.hpp>
 #ifdef GEODE_IS_WINDOWS
@@ -264,6 +266,15 @@ namespace {
         // ticks, used instead of the stage's when on. Order: MODE_NAMES.
         bool perMode = false;
         std::array<int, 8> modeTicks { 40, 4, 40, 40, 20, 40, 40, 40 };
+        bool perModeRate = false;    // v3.8: a save rate for each game mode
+        std::array<int, 8> modeRates { 100, 100, 100, 100, 100, 100, 100, 100 };
+        bool meterOn = false;        // v3.8: the timing meter at the bottom of the screen
+        CCNode* meter = nullptr;
+        CCLabelBMFont* meterLabel = nullptr;
+        bool saveMap = true;         // v3.8: green marks on the progress bar where you were saved
+        CCDrawNode* saveMapNode = nullptr;
+        bool floatButtonOn = false;  // v3.8: the Saturn button over the level
+        CCNode* floatButton = nullptr;
         bool perfLog = false;        // v2.21: log time / runs / ghost ticks per click
         int simRuns = 0;             // v2.21: predictions run for the current click
         long simTicks = 0;           // v2.21: ghost ticks stepped for the current click
@@ -604,6 +615,7 @@ namespace {
     }
 
     void readModeTicks();
+    void refreshOverlays();  // v3.8: the timing meter, the save map and the floating button follow their settings
 
     void readSettings() {
         auto* mod = Mod::get();
@@ -639,6 +651,10 @@ namespace {
         buf.heatmap = mod->getSettingValue<bool>("death-heatmap");
         buf.saveDing = mod->getSettingValue<bool>("save-ding");
         buf.saveFlash = mod->getSettingValue<bool>("save-flash");
+        buf.meterOn = mod->getSettingValue<bool>("timing-meter");
+        buf.saveMap = mod->getSettingValue<bool>("save-map");
+        buf.floatButtonOn = mod->getSettingValue<bool>("floating-button");
+        refreshOverlays();
         buf.moreTime = mod->getSettingValue<bool>("more-time-death-spots");
         buf.dashAutoRelease = mod->getSettingValue<bool>("dash-auto-release");
         buf.perfLog = mod->getSettingValue<bool>("perf-log");
@@ -761,13 +777,20 @@ namespace {
             int fallback = i == 4 ? wave : i == 1 ? ship : all;
             buf.modeTicks[i] = std::clamp(mod->getSavedValue<int>(fmt::format("mode-ticks-{}", i), fallback), 0, MODE_TICKS_MAX);
         }
+        // v3.8 per-mode save rates, kept the same way
+        buf.perModeRate = mod->getSavedValue<bool>("per-mode-rates", false);
+        for (int i = 0; i < 8; ++i) {
+            buf.modeRates[i] = std::clamp(mod->getSavedValue<int>(fmt::format("mode-rate-{}", i), 100), 0, 100);
+        }
     }
 
     void saveModeTicks() {
         auto* mod = Mod::get();
         mod->setSavedValue("per-mode-frames", buf.perMode);
+        mod->setSavedValue("per-mode-rates", buf.perModeRate);
         for (int i = 0; i < 8; ++i) {
             mod->setSavedValue(fmt::format("mode-ticks-{}", i), buf.modeTicks[i]);
+            mod->setSavedValue(fmt::format("mode-rate-{}", i), buf.modeRates[i]);
         }
     }
 
@@ -3633,7 +3656,107 @@ namespace {
     Stats sessionStats;
     std::string statsKey;
 
-    void noteSave(PlayLayer* layer, int ticks) {
+    // v3.8 timing meter: a bar at the bottom of the screen where every click leaves a mark.
+    // Left of the middle: how early it was (saved, a training hint, or not used because of the
+    // save rate), up to 8 frames. The middle: on time. Right: a click no delay could save.
+    // Presses leave tall marks, releases short ones.
+    enum class Mark { Saved, Hint, Skipped, OnTime, Late, Miss };
+    constexpr float METER_W = 150.f;
+    constexpr float METER_H = 10.f;
+    constexpr float METER_RANGE = 32.f;  // 240/s ticks on the early side: 8 frames
+
+    void meterMark(Mark kind, int ticks, bool down) {
+        if (!buf.meter || !buf.meterOn) {
+            return;
+        }
+        float t = ticks / stepScale();  // in 240/s ticks, like the frames shown everywhere
+        float half = METER_W / 2.f;
+        float early = -std::min(t / METER_RANGE, 1.f) * half;
+        float x = 0.f;
+        ccColor3B color { 255, 255, 255 };
+        std::string text;
+        switch (kind) {
+            case Mark::Saved:
+                x = early;
+                color = { 80, 222, 140 };
+                text = fmt::format("{:g}f early - saved", t * TICK);
+                break;
+            case Mark::Hint:
+                x = early;
+                color = { 120, 200, 255 };
+                text = fmt::format("{:g}f early", t * TICK);
+                break;
+            case Mark::Skipped:
+                x = early;
+                color = { 255, 186, 70 };
+                text = fmt::format("{:g}f early - not saved", t * TICK);
+                break;
+            case Mark::OnTime:
+                text = "on time";
+                break;
+            case Mark::Late:
+                x = half * 0.55f;
+                color = { 240, 92, 104 };
+                text = "late";
+                break;
+            case Mark::Miss:
+                x = half * 0.9f;
+                color = { 240, 92, 104 };
+                text = "no save";
+                break;
+        }
+        float h = down ? METER_H : METER_H * 0.55f;
+        auto* mark = CCLayerColor::create({ color.r, color.g, color.b, 235 }, 2.f, h);
+        mark->ignoreAnchorPointForPosition(false);
+        mark->setAnchorPoint({ 0.5f, 0.f });
+        mark->setPosition({ x, -METER_H / 2.f });
+        mark->runAction(CCSequence::create(CCDelayTime::create(1.2f), CCFadeOut::create(1.3f), CCRemoveSelf::create(), nullptr));
+        buf.meter->addChild(mark, 2);
+        if (buf.meterLabel) {
+            buf.meterLabel->setString(text.c_str());
+            buf.meterLabel->setColor(color);
+            buf.meterLabel->stopAllActions();
+            buf.meterLabel->setOpacity(230);
+            buf.meterLabel->runAction(CCSequence::create(CCDelayTime::create(0.8f), CCFadeOut::create(0.6f), nullptr));
+        }
+    }
+
+    // v3.8 save map: where in this level you were saved (tenths of a percent -> saves), drawn as
+    // green marks on the top half of the progress bar (the death heatmap is red, full height)
+    std::map<int, int> levelSaves;
+
+    void refreshSaveMap() {
+        auto* layer = GameManager::get()->m_playLayer;
+        if (!buf.saveMapNode || !layer || !layer->m_progressBar) {
+            return;
+        }
+        buf.saveMapNode->clear();
+        if (!buf.saveMap || levelSaves.empty()) {
+            return;
+        }
+        auto size = layer->m_progressBar->getContentSize();
+        int most = 0;
+        for (auto const& [at, count] : levelSaves) {
+            most = std::max(most, count);
+        }
+        for (auto const& [at, count] : levelSaves) {
+            float x = 2.f + (at / 1000.f) * (size.width - 4.f);
+            float k = static_cast<float>(count) / most;
+            buf.saveMapNode->drawSegment({ x, size.height / 2.f }, { x, size.height - 2.f }, 0.7f, { 0.31f, 0.87f, 0.55f, 0.45f + 0.5f * k });
+        }
+    }
+
+    void refreshOverlays() {
+        if (buf.meter) {
+            buf.meter->setVisible(buf.meterOn);
+        }
+        if (buf.floatButton) {
+            buf.floatButton->setVisible(buf.floatButtonOn);
+        }
+        refreshSaveMap();
+    }
+
+    void noteSave(PlayLayer* layer, int ticks, bool down) {
         int t = static_cast<int>(std::lround(ticks / stepScale()));
         int pct = std::clamp(static_cast<int>(layer->getCurrentPercent()), 0, 100);
         for (auto* s : { &attemptStats, &sessionStats }) {
@@ -3641,6 +3764,9 @@ namespace {
             s->earlySum += t;
             ++s->savesAt[pct];
         }
+        meterMark(buf.train ? Mark::Hint : Mark::Saved, ticks, down);
+        ++levelSaves[std::clamp(static_cast<int>(std::lround(layer->getCurrentPercent() * 10.f)), 0, 1000)];
+        refreshSaveMap();
         // v2.56: a ding for every real save (training mode shows its hint instead)
         if (buf.saveDing && !buf.train) {
             FMODAudioEngine::sharedEngine()->playEffect("counter003.ogg");
@@ -3667,12 +3793,16 @@ namespace {
         return static_cast<int>(std::clamp<int64_t>(Mod::get()->getSettingValue<int64_t>("save-rate"), 0, 100));
     }
 
+    // v3.8: the rate for this click: its game mode's own when per-mode save rates are on
+    int rateFor(PlayerObject* p1, PlayerObject* p2) {
+        return buf.perModeRate ? std::clamp(buf.modeRates[modeIndex(p1, p2)], 0, 100) : saveRate();
+    }
+
     std::mt19937 saveDice { std::random_device {}() };
 
     // Rolls for a save the buffer found. False: it isn't used, and the input goes through as
     // you made it (as if the buffer were off for this one).
-    bool saveRolls(int ticks, bool down, char const* what) {
-        int rate = saveRate();
+    bool saveRolls(int rate, int ticks, bool down, char const* what) {
         if (rate >= 100) {
             return true;
         }
@@ -3681,6 +3811,7 @@ namespace {
             return true;
         }
         say("NOT SAVED {}{} +{}t ({:g}f): save rate {}% (rolled {})", what, down ? "press" : "release", ticks, ticks * TICK, rate, roll);
+        meterMark(Mark::Skipped, ticks, down);
         return false;
     }
 
@@ -3705,7 +3836,7 @@ namespace {
         if (!buf.train) {
             return false;
         }
-        noteSave(layer, ticks);
+        noteSave(layer, ticks, down);
         say("TRAIN {} {}: {}t ({:g}f) early", what, down ? "press" : "release", ticks, ticks * TICK);
         if (buf.hintLabel) {
             buf.hintLabel->setString(fmt::format("{} {:g}f early", down ? "click" : "release", ticks * TICK).c_str());
@@ -4331,7 +4462,7 @@ namespace {
                 buf.appliedInput = down;
                 return false;
             }
-            if (k > 0 && !saveRolls(k, down, "orb ")) {
+            if (k > 0 && !saveRolls(rateFor(p1, p2), k, down, "orb ")) {
                 decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
                 buf.appliedInput = down;
                 return false;
@@ -4340,7 +4471,7 @@ namespace {
                 // v2.80.1: says so when it isn't a full save (the orb is used, but a crash still follows)
                 say("ORB {} +{}t ({:g}f) -> {}t{}", buf.orbWasTiming ? "timing" : "press", k, k * TICK, orbLanded,
                     orbLanded < horizon ? fmt::format(" (not a full save: still crashes in {}t)", orbLanded) : std::string());
-                noteSave(layer, k);
+                noteSave(layer, k, down);
                 decided(layer, p1, p2, dual, k, down, horizon, releaseAfter);
                 buf.shift = k;
                 queueInput(k - early, down);
@@ -4457,8 +4588,8 @@ namespace {
                         bestCrash = crashAt;
                     }
                 }
-                if (bestK > 0 && !buf.train && saveRolls(bestK, down, "more time ")) {
-                    noteSave(layer, bestK);
+                if (bestK > 0 && !buf.train && saveRolls(rateFor(p1, p2), bestK, down, "more time ")) {
+                    noteSave(layer, bestK, down);
                     say("MORE TIME {}{} +{}t: crash t{} -> {} (died here {}x)", down ? "press" : "release", tickTag, bestK, crash0,
                         bestCrash < 0 ? std::string("none") : fmt::format("t{}", bestCrash), spotAround(sliceOf(p1)).deaths);
                     decided(layer, p1, p2, dual, bestK, down, horizon, releaseAfter);
@@ -4487,6 +4618,7 @@ namespace {
                     releaseAfter = baseHold;  // the path view / drift check show the hold that works
                 }
             }
+            meterMark(Mark::OnTime, 0, down);
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
             buf.appliedInput = down;
             return false;
@@ -4502,6 +4634,7 @@ namespace {
             if (buf.explain) {
                 say("pass press: crash only at {}t, after the jump would land (late crash rule)", base);
             }
+            meterMark(Mark::OnTime, 0, down);  // the crash is the next obstacle's, not this click's
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
             buf.appliedInput = down;
             return false;
@@ -4589,6 +4722,7 @@ namespace {
         if (saved <= 0) {
             say("no save: {}{} dies in {}t (max {}t, best +{}t -> {}t of {}){}", down ? "press" : "release", tickTag, base, maxDelay,
                 dbgBestK, dbgBestRet, horizon, !crashFixed ? "" : base < st(30) ? " - too late: waiting only makes it crash sooner" : " - same crash at any timing (next obstacle)");
+            meterMark(crashFixed && base < st(30) ? Mark::Late : Mark::Miss, 0, down);
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
             buf.appliedInput = down;
             return false;
@@ -4650,7 +4784,7 @@ namespace {
             buf.appliedInput = down;
             return false;
         }
-        if (!saveRolls(saved, down, swingPress ? "swing " : "")) {
+        if (!saveRolls(rateFor(p1, p2), saved, down, swingPress ? "swing " : "")) {
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
             buf.appliedInput = down;
             return false;
@@ -4658,7 +4792,7 @@ namespace {
         if (robotPress) {
             releaseAfter = robotUsedHold;  // the path view / drift check show the hold that works
         }
-        noteSave(layer, saved);
+        noteSave(layer, saved, down);
         say("SAVED {}{} +{}t ({:g}f)  {}->{}  [max {}]{}{}", down ? "press" : "release", tickTag, saved, saved * TICK, base, landed, maxDelay,
             resuming ? fmt::format("  (search went on {}t)", resumeEntry.elapsed) : std::string(),
             robustNote ? std::string("  (robust)")
@@ -5552,6 +5686,226 @@ static void addPreview(CCNode* parent, MenuTheme const& t, CCRect r) {
 }
 
 void checkForUpdate(bool manual);  // v3.3, with the update window
+void openProfiles();                // v3.8, the profiles window (after the menu)
+
+constexpr char const* KOSMOS_REPO = "porqueijjmzm1/Kosmos";
+
+// for links: everything but letters, digits and -_.~ becomes %XX
+static std::string urlEncode(std::string_view text) {
+    std::string out;
+    for (unsigned char c : text) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        }
+        else {
+            out += fmt::format("%{:02X}", c);
+        }
+    }
+    return out;
+}
+
+// ---------- v3.8 profiles ----------
+// A profile is your settings (all but the look, the keys and the update check), your stage and
+// your per-mode frames and save rates, as JSON. Its share code is that JSON in URL-safe base64
+// after "KOSMOS1:".
+
+constexpr char const* PROFILE_SKIP[] = { "menu-theme", "auto-update", "debug-console", "hide-menu-buttons", "floating-button" };
+constexpr std::string_view PROFILE_CODE_PREFIX = "KOSMOS1:";
+constexpr size_t MAX_PROFILES = 6;
+
+static std::string base64Encode(std::string_view in) {
+    static constexpr char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    uint32_t value = 0;
+    int bits = 0;
+    for (unsigned char c : in) {
+        value = (value << 8) | c;
+        bits += 8;
+        while (bits >= 6) {
+            bits -= 6;
+            out += table[(value >> bits) & 63];
+        }
+    }
+    if (bits > 0) {
+        out += table[(value << (6 - bits)) & 63];
+    }
+    return out;
+}
+
+// also takes the standard alphabet and padding, in case a code went through something that changed it
+static std::optional<std::string> base64Decode(std::string_view in) {
+    std::string out;
+    uint32_t value = 0;
+    int bits = 0;
+    for (char c : in) {
+        int v = 0;
+        if (c >= 'A' && c <= 'Z') {
+            v = c - 'A';
+        }
+        else if (c >= 'a' && c <= 'z') {
+            v = c - 'a' + 26;
+        }
+        else if (c >= '0' && c <= '9') {
+            v = c - '0' + 52;
+        }
+        else if (c == '-' || c == '+') {
+            v = 62;
+        }
+        else if (c == '_' || c == '/') {
+            v = 63;
+        }
+        else if (c == '=' || std::isspace(static_cast<unsigned char>(c))) {
+            continue;
+        }
+        else {
+            return std::nullopt;
+        }
+        value = (value << 6) | static_cast<uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += static_cast<char>((value >> bits) & 0xFF);
+        }
+    }
+    return out;
+}
+
+static bool profileSkips(std::string_view key) {
+    return key.starts_with("bind-") || std::any_of(std::begin(PROFILE_SKIP), std::end(PROFILE_SKIP), [&](char const* s) { return key == s; });
+}
+
+static matjson::Value captureProfile() {
+    auto* mod = Mod::get();
+    auto settings = matjson::Value::object();
+    for (auto const& key : mod->getSettingKeys()) {
+        if (profileSkips(key)) {
+            continue;
+        }
+        if (auto setting = mod->getSetting(key)) {
+            matjson::Value value;
+            if (setting->save(value)) {
+                settings[key] = value;
+            }
+        }
+    }
+    auto profile = matjson::Value::object();
+    profile["settings"] = settings;
+    profile["stage"] = buf.stage;
+    profile["per-mode-frames"] = buf.perMode;
+    profile["per-mode-rates"] = buf.perModeRate;
+    auto ticks = matjson::Value::array();
+    auto rates = matjson::Value::array();
+    for (int i = 0; i < 8; ++i) {
+        ticks.push(buf.modeTicks[i]);
+        rates.push(buf.modeRates[i]);
+    }
+    profile["mode-ticks"] = ticks;
+    profile["mode-rates"] = rates;
+    return profile;
+}
+
+// puts a profile's settings in place (a copy, so missing keys can be looked up freely)
+static bool applyProfile(matjson::Value profile) {
+    if (!profile.isObject() || !profile["settings"].isObject()) {
+        return false;
+    }
+    auto* mod = Mod::get();
+    for (auto const& [key, value] : profile["settings"]) {
+        if (profileSkips(key)) {
+            continue;
+        }
+        if (auto setting = mod->getSetting(key)) {
+            setting->load(value);
+        }
+    }
+    if (auto stage = profile["stage"].asInt(); stage.isOk()) {
+        buf.stage = std::clamp(static_cast<int>(stage.unwrap()), 0, STAGE_COUNT - 1);
+    }
+    buf.perMode = profile["per-mode-frames"].asBool().unwrapOr(buf.perMode);
+    buf.perModeRate = profile["per-mode-rates"].asBool().unwrapOr(buf.perModeRate);
+    auto ticks = profile["mode-ticks"];
+    auto rates = profile["mode-rates"];
+    for (int i = 0; i < 8; ++i) {
+        if (ticks.isArray() && static_cast<size_t>(i) < ticks.size()) {
+            buf.modeTicks[i] = std::clamp(static_cast<int>(ticks[i].asInt().unwrapOr(buf.modeTicks[i])), 0, MODE_TICKS_MAX);
+        }
+        if (rates.isArray() && static_cast<size_t>(i) < rates.size()) {
+            buf.modeRates[i] = std::clamp(static_cast<int>(rates[i].asInt().unwrapOr(buf.modeRates[i])), 0, 100);
+        }
+    }
+    mod->setSavedValue("stage", buf.stage);
+    saveModeTicks();
+    resetPending();
+    applyStage();
+    readSettings();
+    refreshWatermark();
+    refreshPanel();
+    queueSave();
+    return true;
+}
+
+struct Profile {
+    std::string name;
+    matjson::Value data;
+};
+
+static std::vector<Profile> loadProfiles() {
+    std::vector<Profile> out;
+    auto list = Mod::get()->getSavedValue<matjson::Value>("profiles");
+    if (!list.isArray()) {
+        return out;
+    }
+    for (auto& item : list) {
+        if (!item.isObject()) {
+            continue;
+        }
+        auto name = item["name"].asString();
+        if (name.isOk() && item["data"].isObject()) {
+            out.push_back({ name.unwrap(), item["data"] });
+        }
+    }
+    return out;
+}
+
+static void storeProfiles(std::vector<Profile> const& profiles) {
+    auto list = matjson::Value::array();
+    for (auto const& p : profiles) {
+        auto item = matjson::Value::object();
+        item["name"] = p.name;
+        item["data"] = p.data;
+        list.push(item);
+    }
+    Mod::get()->setSavedValue("profiles", list);
+    queueSave();
+}
+
+static std::string profileCode(matjson::Value const& data) {
+    return std::string(PROFILE_CODE_PREFIX) + base64Encode(data.dump(matjson::NO_INDENTATION));
+}
+
+static std::optional<matjson::Value> parseProfileCode(std::string code) {
+    auto first = code.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return std::nullopt;
+    }
+    code = code.substr(first);
+    if (!code.starts_with(PROFILE_CODE_PREFIX)) {
+        return std::nullopt;
+    }
+    auto json = base64Decode(std::string_view(code).substr(PROFILE_CODE_PREFIX.size()));
+    if (!json) {
+        return std::nullopt;
+    }
+    auto parsed = matjson::parse(*json);
+    if (parsed.isErr()) {
+        return std::nullopt;
+    }
+    auto value = parsed.unwrap();
+    if (!value.isObject() || !value["settings"].isObject()) {
+        return std::nullopt;
+    }
+    return value;
+}
 }
 
 // v3.0 menu: a clean dark window. A header with the Saturn icon and a live status pill, a
@@ -5587,27 +5941,35 @@ class BufferMenu : public geode::Popup {
         { "swing-smart", "Smart swing" },
         { "auto-click", "Auto-click (practice)" },
     };
-    static constexpr Option TOOLS[] = {
+    // v3.8: what you see and hear in a level has its own tab (Tools had grown too long)
+    static constexpr Option DISPLAY[] = {
         { nullptr, "Path view" },
-        { "training-mode", "Training (hints)" },
+        { "timing-meter", "Timing meter" },
         { "death-heatmap", "Death heatmap" },
+        { "save-map", "Save map" },
         { "save-ding", "Ding on save" },
         { "save-flash", "Flash when save" },
-        { "performance-mode", "Performance mode" },
-        { "explain-inputs", "Explain inputs" },
+        { "floating-button", "Floating button" },
         { "remove-watermark", "Remove watermark" },
         { "hide-menu-buttons", "Hide menu buttons" },
+    };
+    static constexpr Option TOOLS[] = {
+        { "training-mode", "Training (hints)" },
+        { "performance-mode", "Performance mode" },
+        { "explain-inputs", "Explain inputs" },
         { "auto-update", "Update check" },
     };
-    static constexpr char const* TABS[] = { "Buffer", "Prediction", "Modes", "Frames", "Tools", "Themes" };
+    static constexpr char const* TABS[] = { "Buffer", "Prediction", "Modes", "Frames", "Display", "Tools", "Themes" };
     static constexpr char const* TAB_INFO[] = {
         "How far back an early click can be held.",
         "What the hidden ghost checks before a click goes through.",
         "Helpers for each game mode, and latency.",
-        "Your own limit for each game mode. 0 = no buffer.",
-        "What you see while playing, stats, the log and updates.",
+        "Your own limit and save rate for each game mode.",
+        "What you see and hear while playing.",
+        "Training, profiles, stats, the log, bug reports and updates.",
         "A whole new look for the menu. Tap one to use it.",
     };
+    static constexpr int TAB_THEMES = 6;
     // one chip per stage, in STAGES order
     static constexpr char const* STAGE_CHIPS[] = { "0.5f", "1f", "2f", "4f", "6f", "8f", "Custom", "Off" };
     static_assert(static_cast<int>(std::size(STAGE_CHIPS)) == STAGE_COUNT);
@@ -5625,6 +5987,7 @@ private:
 
     static inline BufferMenu* s_open = nullptr;
     static inline int s_tab = 0;
+    static inline bool s_rateView = false;  // v3.8: the Frames tab shows save rates
     static inline bool s_moved = false;
     static inline CCPoint s_pos {};
 
@@ -5660,6 +6023,10 @@ private:
 
     std::array<CCLabelBMFont*, 8> m_modeValues {};
     static constexpr int SAVE_RATE_SLIDER = -1;  // v3.7: the save rate's slider, in the Buffer tab
+    static constexpr int RATE_BASE = 10;         // v3.8: RATE_BASE + mode: that mode's save rate (Frames tab)
+    static bool isModeRate(int slider) {
+        return slider >= RATE_BASE && slider < RATE_BASE + 8;
+    }
     struct ModeSlider {
         int mode;                                // a game mode (MODE_NAMES), or SAVE_RATE_SLIDER
         float x0, x1, y;  // in the page's space
@@ -5804,7 +6171,13 @@ private:
                 d->drawSegment({ c.x - 5.f, c.y }, { c.x + 5.f, c.y }, 0.6f, color);
                 circle(d, { c.x + 1.5f, c.y }, 2.3f, color, 14);
                 break;
-            case 5:  // a palette: a ring with three colours
+            case 4: {  // an eye: what you see while playing
+                auto eye = ellipsePoints(c, 5.f, 3.f, 0.f, 24);
+                d->drawPolygon(eye.data(), static_cast<unsigned>(eye.size()), { 0, 0, 0, 0 }, 0.6f, color);
+                circle(d, c, 1.6f, color, 12);
+                break;
+            }
+            case TAB_THEMES:  // a palette: a ring with three colours
                 circle(d, c, 5.f, { 0, 0, 0, 0 }, 24, 0.6f, color);
                 circle(d, { c.x - 2.f, c.y + 1.4f }, 1.3f, col(THEMES[7].main, 1.f), 10);
                 circle(d, { c.x + 2.f, c.y + 1.4f }, 1.3f, col(THEMES[0].main, 1.f), 10);
@@ -5856,8 +6229,9 @@ private:
         m_frameMenu->addChild(close);
 
         // the session's saves, at the bottom of the sidebar
-        label(m_frame, "THIS SESSION", 0.3f, m_dim, { 17.f, 34.f }, { 0.f, 0.5f });
-        m_saves = label(m_frame, "", 0.46f, m_text, { 17.f, 21.f }, { 0.f, 0.5f });
+        // (lower since v3.8, under the seventh tab)
+        label(m_frame, "THIS SESSION", 0.3f, m_dim, { 17.f, 27.f }, { 0.f, 0.5f });
+        m_saves = label(m_frame, "", 0.46f, m_text, { 17.f, 16.f }, { 0.f, 0.5f });
     }
 
     void refreshHeader() {
@@ -5868,7 +6242,10 @@ private:
         if (buf.enabled && buf.train) {
             text += "  |  training";
         }
-        if (buf.enabled && saveRate() < 100) {
+        if (buf.enabled && buf.perModeRate) {
+            text += "  |  rate/mode";  // v3.8: each mode has its own save rate
+        }
+        else if (buf.enabled && saveRate() < 100) {
             text += fmt::format("  |  {}%", saveRate());  // v3.7: only some saves go ahead
         }
         m_pillLabel->setString(text.c_str());
@@ -6022,10 +6399,37 @@ private:
         optionGrid(options, count, H - HEADER - 60.f);
     }
 
+    // the Frames tab's sliders set each mode's frames, or (v3.8) each mode's save rate
     void pageFrames() {
         heading();
+        char const* views[] = { "Frames", "Save rate" };
+        float vw = 56.f;
+        for (int i = 0; i < 2; ++i) {
+            bool active = (i == 1) == s_rateView;
+            auto* node = CCNode::create();
+            node->setContentSize({ vw, 16.f });
+            auto* d = CCDrawNode::create();
+            if (active) {
+                roundRect(d, { 0.f, 0.f, vw, 16.f }, 5.f, col(m_t.main, 1.f));
+            }
+            else {
+                roundRect(d, { 0.f, 0.f, vw, 16.f }, 5.f, white(0.05f), 0.5f, white(0.09f));
+            }
+            node->addChild(d);
+            auto* l = CCLabelBMFont::create(views[i], font());
+            l->setColor(active ? ccColor3B { 255, 255, 255 } : m_muted);
+            l->setPosition({ vw / 2.f, 8.5f });
+            l->limitLabelWidth(vw - 6.f, 0.38f, 0.2f);
+            node->addChild(l);
+            auto* item = CCMenuItemSpriteExtra::create(node, this, menu_selector(BufferMenu::onFramesView));
+            item->m_scaleMultiplier = 1.05f;
+            item->setTag(i);
+            item->setPosition({ R - vw / 2.f - (1 - i) * (vw + 4.f), H - HEADER - 17.f });
+            m_pageMenu->addChild(item);
+        }
         float y = H - HEADER - 60.f;
-        m_perModeTile = tileItem("Use per-mode frames", { L + CW / 2.f, y }, CW, menu_selector(BufferMenu::onPerMode), 0);
+        m_perModeTile = tileItem(s_rateView ? "Use per-mode save rates" : "Use per-mode frames", { L + CW / 2.f, y }, CW,
+            menu_selector(BufferMenu::onPerMode), 0);
         y -= 32.f;
         float w = (CW - 8.f) / 2.f;
         auto* bg = CCDrawNode::create();
@@ -6039,25 +6443,32 @@ private:
             m_page->addChild(icon, 3);
             auto* track = CCDrawNode::create();
             m_page->addChild(track, 2);
-            m_sliders.push_back({ i, x + 30.f, x + w - 36.f, ry, track });
+            m_sliders.push_back({ s_rateView ? RATE_BASE + i : i, x + 30.f, x + w - 36.f, ry, track });
             m_modeValues[i] = label(m_page, "", 0.42f, m_t.soft, { x + w - 17.f, ry + 0.5f });
         }
-        label(m_page, "Drag a slider: half-frame steps, up to 10 frames. Low latency's 1-frame limit doesn't apply here.", 0.32f, m_dim,
-            { L, 30.f }, { 0.f, 0.5f })->limitLabelWidth(CW, 0.32f, 0.15f);
+        label(m_page,
+            s_rateView ? "Each mode's chance that a save goes ahead, in 5% steps. Off: the save rate in the Buffer tab counts everywhere."
+                       : "Drag a slider: half-frame steps, up to 10 frames. Low latency's 1-frame limit doesn't apply here.",
+            0.32f, m_dim, { L, 30.f }, { 0.f, 0.5f })->limitLabelWidth(CW, 0.32f, 0.15f);
         refreshModes();
     }
 
+    // v3.8: the switches, then two rows of buttons
     void pageTools() {
         heading();
         optionGrid(TOOLS, std::size(TOOLS), H - HEADER - 60.f);
-        char const* names[] = { "Stats", "Console", "Copy log", "Forget level", "Settings", "Updates" };
-        SEL_MenuHandler handlers[] = { menu_selector(BufferMenu::onStats), menu_selector(BufferMenu::onConsole),  // phones have no F9
+        char const* names[] = { "Profiles", "Report bug", "Stats", "Console", "Copy log", "Forget level", "Settings", "Updates" };
+        SEL_MenuHandler handlers[] = { menu_selector(BufferMenu::onProfiles), menu_selector(BufferMenu::onReportBug),
+            menu_selector(BufferMenu::onStats), menu_selector(BufferMenu::onConsole),  // phones have no F9
             menu_selector(BufferMenu::onCopyLog), menu_selector(BufferMenu::onForget), menu_selector(BufferMenu::onAllSettings),
             menu_selector(BufferMenu::onUpdates) };
-        float bw = (CW - 5.f * 5.f) / 6.f;
-        for (int i = 0; i < 6; ++i) {
-            button(m_pageMenu, names[i], handlers[i], { L + bw / 2.f + i * (bw + 5.f), 30.f }, bw);
+        float bw = (CW - 3.f * 6.f) / 4.f;
+        for (int i = 0; i < 8; ++i) {
+            float y = i < 4 ? 98.f : 70.f;
+            button(m_pageMenu, names[i], handlers[i], { L + bw / 2.f + (i % 4) * (bw + 6.f), y }, bw, i < 2, 0, 22.f);
         }
+        label(m_page, "Profiles: save or share your settings. Report bug: copies the log and opens GitHub.",
+            0.32f, m_dim, { L, 30.f }, { 0.f, 0.5f })->limitLabelWidth(CW, 0.32f, 0.15f);
     }
 
     // v3.4: the themes by group, each card a small preview of the window in that theme
@@ -6137,8 +6548,9 @@ private:
             case 1: pageOptions(PREDICTION, std::size(PREDICTION)); break;
             case 2: pageOptions(MODES, std::size(MODES)); break;
             case 3: pageFrames(); break;
-            case 4: pageTools(); break;
-            case 5: pageThemes(); break;
+            case 4: pageOptions(DISPLAY, std::size(DISPLAY)); break;
+            case 5: pageTools(); break;
+            case TAB_THEMES: pageThemes(); break;
             default: pageBuffer(); break;
         }
         buildTabs();
@@ -6171,9 +6583,22 @@ private:
     void drawSlider(ModeSlider const& sl) {
         auto* d = sl.draw;
         d->clear();
-        bool rate = sl.mode == SAVE_RATE_SLIDER;
-        float t = rate ? saveRate() / 100.f : static_cast<float>(buf.modeTicks[sl.mode]) / MODE_TICKS_MAX;
-        bool on = rate || buf.perMode;  // the save rate always counts; mode frames only when per mode is on
+        // lit while it counts: the Buffer tab's save rate unless each mode has its own, and the
+        // per-mode sliders while their switch is on
+        float t = 0.f;
+        bool on = false;
+        if (sl.mode == SAVE_RATE_SLIDER) {
+            t = saveRate() / 100.f;
+            on = !buf.perModeRate;
+        }
+        else if (isModeRate(sl.mode)) {
+            t = buf.modeRates[sl.mode - RATE_BASE] / 100.f;
+            on = buf.perModeRate;
+        }
+        else {
+            t = static_cast<float>(buf.modeTicks[sl.mode]) / MODE_TICKS_MAX;
+            on = buf.perMode;
+        }
         float kx = sl.x0 + (sl.x1 - sl.x0) * t;
         roundRect(d, { sl.x0, sl.y - 1.5f, sl.x1 - sl.x0, 3.f }, 1.5f, white(0.1f));
         if (kx - sl.x0 > 1.f) {
@@ -6195,6 +6620,15 @@ private:
             }
             return;
         }
+        if (isModeRate(sl.mode)) {
+            int rate = static_cast<int>(std::lround(t * 20.f)) * 5;
+            int& value = buf.modeRates[sl.mode - RATE_BASE];
+            if (rate != value) {
+                value = rate;
+                refreshModes();
+            }
+            return;
+        }
         int ticks = static_cast<int>(std::lround(t * MODE_TICKS_MAX / 2.f)) * 2;
         if (ticks != buf.modeTicks[sl.mode]) {
             buf.modeTicks[sl.mode] = ticks;
@@ -6206,17 +6640,22 @@ private:
         for (auto const& sl : m_sliders) {
             drawSlider(sl);
         }
+        bool lit = s_rateView ? buf.perModeRate : buf.perMode;
         for (int i = 0; i < 8; ++i) {
             if (m_modeValues[i]) {
-                m_modeValues[i]->setString(fmt::format("{:g}f", buf.modeTicks[i] * TICK).c_str());
-                m_modeValues[i]->setColor(buf.perMode ? m_t.soft : m_dim);
+                m_modeValues[i]->setString(s_rateView ? fmt::format("{}%", buf.modeRates[i]).c_str()
+                                                      : fmt::format("{:g}f", buf.modeTicks[i] * TICK).c_str());
+                m_modeValues[i]->limitLabelWidth(26.f, 0.42f, 0.2f);  // "100%" stays clear of the knob
+                m_modeValues[i]->setColor(lit ? m_t.soft : m_dim);
             }
         }
         if (m_perModeTile.draw) {
-            drawTile(m_perModeTile, buf.perMode);
+            drawTile(m_perModeTile, lit);
         }
         if (m_saveRateLabel) {
-            m_saveRateLabel->setString(fmt::format("{}%", saveRate()).c_str());
+            // with per-mode save rates on, the Frames tab's rates count instead
+            m_saveRateLabel->setString(buf.perModeRate ? "mode" : fmt::format("{}%", saveRate()).c_str());
+            m_saveRateLabel->setColor(buf.perModeRate ? m_dim : m_t.soft);
         }
     }
 
@@ -6272,6 +6711,11 @@ private:
             m_dragSlider = -1;
             if (mode == SAVE_RATE_SLIDER) {
                 say("save rate: {}%", saveRate());
+                return;
+            }
+            if (isModeRate(mode)) {
+                saveModeTicks();
+                say("{} save rate: {}%", MODE_NAMES[mode - RATE_BASE], buf.modeRates[mode - RATE_BASE]);
                 return;
             }
             saveModeTicks();
@@ -6357,12 +6801,50 @@ private:
     }
 
     void onPerMode(CCObject*) {
+        if (s_rateView) {  // v3.8: the tile for per-mode save rates
+            buf.perModeRate = !buf.perModeRate;
+            saveModeTicks();
+            say("per-mode save rates {}", buf.perModeRate ? "on" : "off");
+            refresh();
+            return;
+        }
         buf.perMode = !buf.perMode;
         saveModeTicks();
         refreshWatermark();
         refreshPanel();
         say("per-mode frames {}", buf.perMode ? "on" : "off");
         refresh();
+    }
+
+    // v3.8: the Frames tab's sliders: frames or save rates
+    void onFramesView(CCObject* sender) {
+        bool rates = sender->getTag() == 1;
+        if (rates != s_rateView) {
+            s_rateView = rates;
+            rebuildPage();
+        }
+    }
+
+    // v3.8: your settings under a name, or as a code
+    void onProfiles(CCObject*) {
+        openProfiles();
+    }
+
+    // v3.8: the log goes to the clipboard and a new GitHub issue opens with the details filled
+    // in; you paste the log into it
+    void onReportBug(CCObject*) {
+        exportConsole();
+        auto* level = GameManager::get()->m_playLayer ? GameManager::get()->m_playLayer->m_level : nullptr;
+        auto body = fmt::format(
+            "**What happened?**\n\n\n**What did you expect?**\n\n\n**Version:** {}\n**Platform:** {}\n**Level:** {}\n\n"
+            "**Log** (it was copied to your clipboard when you tapped Report bug: paste it below)\n\n```\n\n```\n",
+            Mod::get()->getVersion().toVString(), GEODE_PLATFORM_NAME,
+            level ? fmt::format("{} ({})", std::string(level->m_levelName), level->m_levelID.value()) : std::string("-"));
+        web::openLinkInBrowser(fmt::format("https://github.com/{}/issues/new?title={}&body={}", KOSMOS_REPO, urlEncode("Bug: "),
+            urlEncode(body)));
+        FLAlertLayer::create("Report a bug",
+            "The <cg>log</c> is in your clipboard. In the GitHub page that just opened, describe what happened and <cy>paste the log</c> where it says.",
+            "OK")->show();
     }
 
     void onAllSettings(CCObject*) {
@@ -6482,7 +6964,268 @@ public:
             menu->show();
         }
     }
+
+    // v3.8: after a profile is loaded, the open menu shows its values
+    static void refreshIfOpen() {
+        if (s_open) {
+            s_open->buildFrame();
+            s_open->rebuildPage();
+        }
+    }
 };
+
+// v3.8 profiles window, in the menu's style: your saved profiles (load, copy a share code,
+// delete), and at the bottom a name to save the current settings under, or a code to import
+// from the clipboard.
+class ProfilesWindow : public geode::Popup {
+    static constexpr float W = 360.f;
+    static constexpr float H = 250.f;
+    static constexpr float HEADER = 36.f;
+    static constexpr float ROW_H = 20.f;
+    static constexpr float ROW_PITCH = 23.f;
+
+    static inline ProfilesWindow* s_open = nullptr;
+
+    MenuTheme m_t = currentTheme();
+    Ink m_ink = inkFor(m_t);
+    std::vector<Profile> m_profiles;
+    CCNode* m_list = nullptr;
+    TextInput* m_name = nullptr;
+
+    CCLabelBMFont* label(CCNode* parent, std::string const& str, float scale, ccColor3B color, CCPoint at, CCPoint anchor = { 0.5f, 0.5f }) {
+        auto* l = CCLabelBMFont::create(str.c_str(), font());
+        l->setScale(scale);
+        l->setColor(color);
+        l->setAnchorPoint(anchor);
+        l->setPosition(at);
+        parent->addChild(l, 3);
+        return l;
+    }
+
+    CCMenuItemSpriteExtra* button(CCMenu* menu, std::string const& str, SEL_MenuHandler handler, CCPoint center, float width,
+        bool primary, int tag = 0, float height = 20.f) {
+        auto* node = CCNode::create();
+        node->setContentSize({ width, height });
+        auto* d = CCDrawNode::create();
+        if (primary) {
+            roundRect(d, { 0.f, 0.f, width, height }, 6.f, col(m_t.main, 1.f));
+        }
+        else {
+            roundRect(d, { 0.f, 0.f, width, height }, 6.f, white(0.06f), 0.5f, white(0.1f));
+        }
+        node->addChild(d);
+        auto* l = CCLabelBMFont::create(str.c_str(), font());
+        l->setColor(primary ? ccColor3B { 255, 255, 255 } : m_ink.text);
+        l->setPosition({ width / 2.f, height / 2.f + 0.5f });
+        l->limitLabelWidth(width - 8.f, 0.44f, 0.2f);
+        node->addChild(l);
+        auto* item = CCMenuItemSpriteExtra::create(node, this, handler);
+        item->m_scaleMultiplier = 1.05f;
+        item->setTag(tag);
+        item->setPosition(center);
+        menu->addChild(item);
+        return item;
+    }
+
+    void buildFrame() {
+        drawWindow(m_mainLayer, m_t, W, H, HEADER);
+        float cy = H - HEADER / 2.f;
+        label(m_mainLayer, "Profiles", 0.6f, m_ink.text, { 40.f, cy + 5.f }, { 0.f, 0.5f });
+        label(m_mainLayer, "Kosmos", 0.34f, m_ink.dim, { 40.f, cy - 7.5f }, { 0.f, 0.5f });
+        auto* menu = CCMenu::create();
+        menu->setPosition({ 0.f, 0.f });
+        m_mainLayer->addChild(menu, 5);
+        auto* node = CCNode::create();
+        node->setContentSize({ 20.f, 20.f });
+        auto* x = CCDrawNode::create();
+        roundRect(x, { 0.f, 0.f, 20.f, 20.f }, 6.f, white(0.05f), 0.5f, white(0.1f));
+        x->drawSegment({ 7.f, 7.f }, { 13.f, 13.f }, 0.6f, col(m_ink.text, 0.9f));
+        x->drawSegment({ 7.f, 13.f }, { 13.f, 7.f }, 0.6f, col(m_ink.text, 0.9f));
+        node->addChild(x);
+        auto* close = CCMenuItemSpriteExtra::create(node, this, menu_selector(ProfilesWindow::onClose));
+        close->setPosition({ W - 22.f, cy });
+        menu->addChild(close);
+
+        // the bottom: a name, Save, Import, and what the buttons do
+        m_name = TextInput::create(220.f, "Profile name");
+        m_name->setScale(0.72f);
+        m_name->setCommonFilter(CommonFilter::Any);
+        m_name->setMaxCharCount(24);
+        m_name->setPosition({ 14.f + 110.f * 0.72f, 46.f });
+        m_mainLayer->addChild(m_name, 4);
+        button(menu, "Save current", menu_selector(ProfilesWindow::onSave), { W - 14.f - 64.f - 6.f - 42.f, 46.f }, 84.f, true, 0, 22.f);
+        button(menu, "Import", menu_selector(ProfilesWindow::onImport), { W - 14.f - 32.f, 46.f }, 64.f, false, 0, 22.f);
+        label(m_mainLayer, "Load uses a profile. Code copies it to share; Import adds a code from your clipboard.", 0.3f, m_ink.dim,
+            { 14.f, 20.f }, { 0.f, 0.5f })->limitLabelWidth(W - 28.f, 0.3f, 0.15f);
+    }
+
+    // one row per profile: its name, Load, Code and delete
+    void buildList() {
+        if (m_list) {
+            m_list->removeFromParent();
+        }
+        m_list = CCNode::create();
+        m_mainLayer->addChild(m_list, 4);
+        auto* menu = CCMenu::create();
+        menu->setPosition({ 0.f, 0.f });
+        m_list->addChild(menu, 5);
+        auto* bg = CCDrawNode::create();
+        m_list->addChild(bg, 1);
+        float top = H - HEADER - 22.f;
+        if (m_profiles.empty()) {
+            label(m_list, "No profiles yet.", 0.5f, m_ink.text, { W / 2.f, top - 40.f });
+            label(m_list, "Type a name below and tap Save current to keep your settings.", 0.34f, m_ink.muted, { W / 2.f, top - 58.f })
+                ->limitLabelWidth(W - 40.f, 0.34f, 0.15f);
+        }
+        for (size_t i = 0; i < m_profiles.size(); ++i) {
+            float y = top - i * ROW_PITCH;
+            roundRect(bg, { 14.f, y - ROW_H / 2.f, W - 28.f, ROW_H }, 6.f, white(0.035f), 0.5f, white(0.07f));
+            label(m_list, m_profiles[i].name, 0.42f, m_ink.text, { 22.f, y + 0.5f }, { 0.f, 0.5f })->limitLabelWidth(W - 190.f, 0.42f, 0.2f);
+            int tag = static_cast<int>(i);
+            button(menu, "Load", menu_selector(ProfilesWindow::onLoad), { W - 14.f - 4.f - 22.f - 6.f - 44.f - 6.f - 25.f, y }, 50.f, true, tag, 16.f);
+            button(menu, "Code", menu_selector(ProfilesWindow::onCode), { W - 14.f - 4.f - 22.f - 6.f - 22.f, y }, 44.f, false, tag, 16.f);
+            button(menu, "x", menu_selector(ProfilesWindow::onDelete), { W - 14.f - 4.f - 11.f, y }, 22.f, false, tag, 16.f);
+        }
+        handleTouchPriority(this);
+    }
+
+    std::string typedName() {
+        std::string name = m_name ? std::string(m_name->getString()) : std::string();
+        auto first = name.find_first_not_of(' ');
+        auto last = name.find_last_not_of(' ');
+        return first == std::string::npos ? std::string() : name.substr(first, last - first + 1);
+    }
+
+    // a profile under this name is replaced; otherwise added, if there's room
+    bool put(std::string name, matjson::Value data) {
+        if (name.empty()) {
+            name = fmt::format("Profile {}", m_profiles.size() + 1);
+        }
+        for (auto& p : m_profiles) {
+            if (p.name == name) {
+                p.data = std::move(data);
+                storeProfiles(m_profiles);
+                return true;
+            }
+        }
+        if (m_profiles.size() >= MAX_PROFILES) {
+            Notification::create(fmt::format("{} profiles at most: delete one first", MAX_PROFILES), NotificationIcon::Error)->show();
+            return false;
+        }
+        m_profiles.push_back({ std::move(name), std::move(data) });
+        storeProfiles(m_profiles);
+        return true;
+    }
+
+    void onSave(CCObject*) {
+        auto name = typedName();
+        if (put(name, captureProfile())) {
+            say("profile saved: {}", name.empty() ? m_profiles.back().name : name);
+            Notification::create("Profile saved", NotificationIcon::Success)->show();
+            if (m_name) {
+                m_name->setString("");
+            }
+            buildList();
+        }
+    }
+
+    void onImport(CCObject*) {
+        auto data = parseProfileCode(geode::utils::clipboard::read());
+        if (!data) {
+            Notification::create("No Kosmos code in your clipboard", NotificationIcon::Error)->show();
+            return;
+        }
+        auto name = typedName();
+        if (put(name.empty() ? fmt::format("Imported {}", m_profiles.size() + 1) : name, *data)) {
+            say("profile imported");
+            Notification::create("Profile imported: tap Load to use it", NotificationIcon::Success)->show();
+            buildList();
+        }
+    }
+
+    void onLoad(CCObject* sender) {
+        auto i = static_cast<size_t>(sender->getTag());
+        if (i >= m_profiles.size()) {
+            return;
+        }
+        if (applyProfile(m_profiles[i].data)) {
+            say("profile loaded: {} ({})", m_profiles[i].name, stageText());
+            Notification::create(fmt::format("Loaded {}", m_profiles[i].name), NotificationIcon::Success)->show();
+            BufferMenu::refreshIfOpen();
+        }
+        else {
+            Notification::create("That profile couldn't be read", NotificationIcon::Error)->show();
+        }
+    }
+
+    void onCode(CCObject* sender) {
+        auto i = static_cast<size_t>(sender->getTag());
+        if (i >= m_profiles.size()) {
+            return;
+        }
+        geode::utils::clipboard::write(profileCode(m_profiles[i].data));
+        Notification::create("Code copied: send it to a friend", NotificationIcon::Success)->show();
+    }
+
+    void onDelete(CCObject* sender) {
+        auto i = static_cast<size_t>(sender->getTag());
+        if (i >= m_profiles.size()) {
+            return;
+        }
+        say("profile deleted: {}", m_profiles[i].name);
+        m_profiles.erase(m_profiles.begin() + static_cast<std::ptrdiff_t>(i));
+        storeProfiles(m_profiles);
+        buildList();
+    }
+
+    void onClose(CCObject*) {
+        this->keyBackClicked();
+    }
+
+protected:
+    bool init() {
+        if (!Popup::init(W, H, "GJ_square04.png")) {
+            return false;
+        }
+        m_bgSprite->setVisible(false);
+        if (m_closeBtn) {
+            m_closeBtn->setVisible(false);
+            m_closeBtn->setEnabled(false);
+        }
+        this->setOpacity(120);
+        s_open = this;
+        m_profiles = loadProfiles();
+        buildFrame();
+        buildList();
+        return true;
+    }
+
+public:
+    ~ProfilesWindow() override {
+        if (s_open == this) {
+            s_open = nullptr;
+        }
+    }
+
+    static void open() {
+        if (s_open) {
+            return;
+        }
+        auto* ret = new ProfilesWindow();
+        if (ret->init()) {
+            ret->autorelease();
+            ret->show();
+            return;
+        }
+        delete ret;
+    }
+};
+
+namespace {
+void openProfiles() {
+    ProfilesWindow::open();
+}
+}
 
 // v2.75.1: the level complete screen no longer shows "Click Before Frames was on" or the
 // saves count in the top right corner; the attempt is still finished here.
@@ -6608,6 +7351,124 @@ $on_mod(Loaded) {
     say("Kosmos {} loaded. Stage key cycles: 0.5f -> 1f -> 2f -> 4f -> 6f -> 8f -> custom -> off",
         Mod::get()->getVersion().toVString());
     saveNow();  // v3.2: the game's start (keeps the moved-over v3.0 data and the switched-once settings)
+}
+
+// v3.8: a Saturn button over the level that opens the menu (the game pauses first, like the
+// menu key). Drag it anywhere and it stays there. On by default on phones, which have no menu
+// key. A tap on it never reaches the game, so it doesn't jump.
+namespace {
+void keyAction(int action);  // with the keybinds, below
+
+class FloatingButton : public CCNode, public CCTouchDelegate {
+    CCSprite* m_sprite = nullptr;
+    float m_scale = 1.f;
+    float m_radius = 16.f;
+    CCPoint m_touchStart {};
+    bool m_dragging = false;
+
+    CCPoint clampToScreen(CCPoint p) const {
+        auto win = CCDirector::get()->getWinSize();
+        return { std::clamp(p.x, m_radius, win.width - m_radius), std::clamp(p.y, m_radius, win.height - m_radius) };
+    }
+
+    bool init() override {
+        if (!CCNode::init()) {
+            return false;
+        }
+        auto* top = CCSprite::create("saturn.png"_spr);
+        if (!top) {
+            return false;
+        }
+        top->setScale(0.5f);
+        m_sprite = CircleButtonSprite::create(top, CircleBaseColor::Blue, CircleBaseSize::Small);
+        if (!m_sprite) {
+            return false;
+        }
+        m_sprite->setCascadeOpacityEnabled(true);
+        m_sprite->setOpacity(170);
+        m_scale = 0.85f;
+        m_sprite->setScale(m_scale);
+        m_radius = m_sprite->getContentSize().width * m_scale / 2.f;
+        this->addChild(m_sprite);
+        this->setID("floating-button"_spr);
+        auto win = CCDirector::get()->getWinSize();
+        auto* mod = Mod::get();
+        this->setPosition(clampToScreen({ static_cast<float>(mod->getSavedValue<double>("float-button-x", 0.06)) * win.width,
+            static_cast<float>(mod->getSavedValue<double>("float-button-y", 0.7)) * win.height }));
+        return true;
+    }
+
+public:
+    static FloatingButton* create() {
+        auto* ret = new FloatingButton();
+        if (ret->init()) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+
+    // ahead of the level's own touch handling, so the tap is ours
+    void onEnter() override {
+        CCNode::onEnter();
+        CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -510, true);
+    }
+
+    void onExit() override {
+        CCDirector::get()->getTouchDispatcher()->removeDelegate(this);
+        CCNode::onExit();
+    }
+
+    bool ccTouchBegan(CCTouch* touch, CCEvent*) override {
+        if (!this->isVisible() || !m_sprite) {
+            return false;
+        }
+        // not while paused or with a popup open: those get their taps
+        auto* layer = GameManager::get()->m_playLayer;
+        if (!layer || layer->m_isPaused) {
+            return false;
+        }
+        if (auto* scene = CCDirector::get()->getRunningScene()) {
+            if (scene->getChildByType<FLAlertLayer>(0) || scene->getChildByType<PauseLayer>(0)) {
+                return false;
+            }
+        }
+        if (ccpDistance(this->convertToNodeSpace(touch->getLocation()), { 0.f, 0.f }) > m_radius + 4.f) {
+            return false;
+        }
+        m_touchStart = touch->getLocation();
+        m_dragging = false;
+        m_sprite->setScale(m_scale * 0.9f);
+        return true;
+    }
+
+    void ccTouchMoved(CCTouch* touch, CCEvent*) override {
+        if (!m_dragging && ccpDistance(touch->getLocation(), m_touchStart) > 8.f) {
+            m_dragging = true;
+        }
+        if (m_dragging) {
+            this->setPosition(clampToScreen(this->getPosition() + touch->getDelta()));
+        }
+    }
+
+    void ccTouchEnded(CCTouch*, CCEvent*) override {
+        m_sprite->setScale(m_scale);
+        if (m_dragging) {
+            m_dragging = false;
+            auto win = CCDirector::get()->getWinSize();
+            Mod::get()->setSavedValue("float-button-x", static_cast<double>(this->getPositionX() / win.width));
+            Mod::get()->setSavedValue("float-button-y", static_cast<double>(this->getPositionY() / win.height));
+            return;
+        }
+        keyAction(1);  // pause, then the menu
+    }
+
+    void ccTouchCancelled(CCTouch*, CCEvent*) override {
+        m_sprite->setScale(m_scale);
+        m_dragging = false;
+    }
+};
 }
 
 class $modify(BufPlayLayer, PlayLayer) {
@@ -6813,11 +7674,48 @@ class $modify(BufPlayLayer, PlayLayer) {
         this->addChild(buf.hintLabel);
 
         buf.heatNode = nullptr;
+        buf.saveMapNode = nullptr;
+        levelSaves.clear();
         if (m_progressBar) {
             buf.heatNode = CCDrawNode::create();
             m_progressBar->addChild(buf.heatNode, 5);
             refreshHeatmap();
+            buf.saveMapNode = CCDrawNode::create();  // v3.8: above the death marks
+            m_progressBar->addChild(buf.saveMapNode, 6);
         }
+
+        // v3.8 timing meter, bottom centre: the bar, a notch per frame on the early side, the
+        // late side tinted red, and the latest click's text above it
+        buf.meter = CCNode::create();
+        buf.meter->setID("timing-meter"_spr);
+        buf.meter->setPosition({ win.width / 2.f, 16.f });
+        buf.meter->setZOrder(1000);
+        {
+            float half = METER_W / 2.f;
+            auto* bar = CCDrawNode::create();
+            roundRect(bar, { -half - 4.f, -METER_H / 2.f - 3.f, METER_W + 8.f, METER_H + 6.f }, 5.f, col({ 0, 0, 0 }, 0.4f), 0.5f, white(0.12f));
+            roundRect(bar, { 0.f, -METER_H / 2.f, half, METER_H }, 2.f, col({ 240, 92, 104 }, 0.12f));
+            for (int f = 1; f <= 8; ++f) {
+                float x = -half * f / 8.f;
+                bar->drawSegment({ x, -METER_H / 2.f }, { x, -METER_H / 2.f + (f % 2 == 0 ? 4.f : 2.5f) }, 0.3f, white(0.25f));
+            }
+            bar->drawSegment({ 0.f, -METER_H / 2.f - 1.f }, { 0.f, METER_H / 2.f + 1.f }, 0.5f, white(0.8f));
+            buf.meter->addChild(bar, 0);
+        }
+        buf.meterLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        buf.meterLabel->setScale(0.28f);
+        buf.meterLabel->setOpacity(0);
+        buf.meterLabel->setPosition({ 0.f, METER_H / 2.f + 9.f });
+        buf.meter->addChild(buf.meterLabel, 3);
+        this->addChild(buf.meter);
+
+        // v3.8 the floating menu button
+        buf.floatButton = FloatingButton::create();
+        if (buf.floatButton) {
+            buf.floatButton->setZOrder(1001);
+            this->addChild(buf.floatButton);
+        }
+        refreshOverlays();
 
         // Path view lives in the object layer, so it scrolls with the level.
         buf.pathNode = CCDrawNode::create();
@@ -6845,6 +7743,10 @@ class $modify(BufPlayLayer, PlayLayer) {
         saveNow();  // v3.2: leaving a level
         buf.hintLabel = nullptr;
         buf.heatNode = nullptr;
+        buf.saveMapNode = nullptr;
+        buf.meter = nullptr;
+        buf.meterLabel = nullptr;
+        buf.floatButton = nullptr;
         memoryKey.clear();
         dropGhosts();
         PlayLayer::onQuit();

@@ -22,8 +22,8 @@ GROUPS = [
     ("Speed", "How long predictions may take, so clicks never stutter.",
      ["auto-budget", "sim-budget-ms", "no-hitch-searches", "performance-mode", "tps"]),
     ("Tools & look", "What you see while playing, and the menu.",
-     ["show-path", "training-mode", "death-heatmap", "save-ding", "save-flash", "remove-watermark", "hide-menu-buttons",
-      "menu-theme", "auto-update"]),
+     ["show-path", "timing-meter", "training-mode", "death-heatmap", "save-map", "save-ding", "save-flash", "floating-button",
+      "remove-watermark", "hide-menu-buttons", "menu-theme", "auto-update"]),
     ("Keys", "Keys that work inside a level (change them here or in Geode's keybinds popup).",
      ["bind-stage", "bind-menu", "bind-export", "bind-console", "bind-path", "bind-forget"]),
     ("Debug", "For finding problems. Logs go to the in-game console (F9).",
@@ -35,6 +35,12 @@ KEY_NAMES = {"Six": "6", "Seven": "7"}
 
 def show_default(s):
     value = s.get("default")
+    if isinstance(value, dict):  # a default per platform
+        phones = value.get("android"), value.get("ios")
+        pc = value.get("win"), value.get("mac")
+        if s.get("type") == "bool" and len(set(phones)) == 1 and len(set(pc)) == 1:
+            return f"{'On' if phones[0] else 'Off'} on phones, {'on' if pc[0] else 'off'} on PC"
+        return ", ".join(f"{k}: {v}" for k, v in value.items())
     if s.get("type") == "bool":
         return "On" if value else "Off"
     if s.get("type") == "keybind":

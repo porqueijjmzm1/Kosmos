@@ -6,7 +6,7 @@
 		"mac": "2.2081",
 		"ios": "2.2081"
 	},
-	"version": "v3.7.0",
+	"version": "v3.8.0",
 	"id": "timbodev.input-buffer",
 	"name": "Kosmos",
 	"developer": "timbodev",
@@ -403,6 +403,29 @@
 			"name": "Flash when save",
 			"description": "Flashes the screen green every time the buffer saves one of your clicks.",
 			"default": false
+		},
+		"timing-meter": {
+			"type": "bool",
+			"name": "Timing meter",
+			"description": "A bar at the bottom of the screen in levels, like a rhythm game: every click leaves a mark. Left of the middle: how many frames early it was (green: saved, blue: a training hint, orange: not saved because of the save rate). The middle: on time. Right, in red: a click no delay could save. Presses leave tall marks, releases short ones.",
+			"default": false
+		},
+		"save-map": {
+			"type": "bool",
+			"name": "Save map",
+			"description": "Green marks on the top half of the progress bar where the buffer saved you in this level (brighter = more saves), next to the red death heatmap.",
+			"default": true
+		},
+		"floating-button": {
+			"type": "bool",
+			"name": "Floating button",
+			"description": "A Saturn button over the level that opens the menu (the game pauses first). Drag it anywhere; it stays where you leave it. A tap on it doesn't make you jump. On by default on phones.",
+			"default": {
+				"win": false,
+				"mac": false,
+				"android": true,
+				"ios": true
+			}
 		},
 		"performance-mode": {
 			"type": "bool",

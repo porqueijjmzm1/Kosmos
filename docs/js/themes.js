@@ -464,19 +464,22 @@
   // ---------- the menu ----------
 
   const W = 440, H = 276, HEADER = 36, SIDE = 118, L = SIDE + 2, R = W - 12, CW = R - L, TILE_H = 24, PITCH = 28;
-  const TABS = ["Buffer", "Prediction", "Modes", "Frames", "Tools", "Themes"];
+  const TABS = ["Buffer", "Prediction", "Modes", "Frames", "Display", "Tools", "Themes"];
   const TAB_INFO = [
     "How far back an early click can be held.",
     "What the hidden ghost checks before a click goes through.",
     "Helpers for each game mode, and latency.",
-    "Your own limit for each game mode. 0 = no buffer.",
-    "What you see while playing, stats, the log and updates.",
+    "Your own limit and save rate for each game mode.",
+    "What you see and hear while playing.",
+    "Training, profiles, stats, the log, bug reports and updates.",
     "A whole new look for the menu. Tap one to use it.",
   ];
+  const TAB_THEMES = 6;
   const OPTIONS = {
     1: [["Robust saves", 1], ["Orb alignment", 1], ["Orb timing", 1], ["Moving objects", 0], ["Move triggers", 1], ["Through portals", 1], ["Two clicks ahead", 1], ["No-hitch searches", 1], ["Level memory", 1], ["More time at deaths", 1]],
     2: [["Low latency", 1], ["CBF sync", 1], ["Ship buffering", 1], ["Smart robot", 1], ["Smart spider", 1], ["Smart UFO", 1], ["Smart ball", 1], ["Smart swing", 1], ["Auto-click (practice)", 0]],
-    4: [["Path view", 0], ["Training (hints)", 0], ["Death heatmap", 1], ["Ding on save", 1], ["Flash when save", 0], ["Performance mode", 0], ["Explain inputs", 0], ["Remove watermark", 0], ["Hide menu buttons", 0], ["Update check", 1]],
+    4: [["Path view", 0], ["Timing meter", 1], ["Death heatmap", 1], ["Save map", 1], ["Ding on save", 1], ["Flash when save", 0], ["Floating button", 1], ["Remove watermark", 0], ["Hide menu buttons", 0]],
+    5: [["Training (hints)", 0], ["Performance mode", 0], ["Explain inputs", 0], ["Update check", 1]],
   };
   const STAGE_CHIPS = ["0.5f", "1f", "2f", "4f", "6f", "8f", "Custom", "Off"];
   const MODE_NAMES = ["Cube", "Ship", "Ball", "UFO", "Wave", "Robot", "Spider", "Swing"];
@@ -521,7 +524,18 @@
         p.seg(x - 5, y, x + 5, y, 0.6, color);
         p.circle(x + 1.5, y, 2.3, color);
         break;
-      case 5:
+      case 4: {
+        // an eye: what you see while playing
+        const c = p.ctx;
+        c.beginPath();
+        c.ellipse(x, y, 5, 3, 0, 0, TAU);
+        c.lineWidth = 1.2;
+        c.strokeStyle = color;
+        c.stroke();
+        p.circle(x, y, 1.6, color);
+        break;
+      }
+      case TAB_THEMES:
         p.circle(x, y, 5, null, 0.6, color);
         p.circle(x - 2, y + 1.4, 1.3, rgba(colors[0], 1));
         p.circle(x + 2, y + 1.4, 1.3, rgba(colors[1], 1));
@@ -631,8 +645,8 @@
       p.text(name, 9.6, rgba(active ? k.text : k.muted, 1), tx + 25, ty + th / 2 + 0.5);
       hit(tx, ty, tw, th, () => (state.tab = i));
     });
-    p.text("THIS SESSION", 6, rgba(k.dim, 1), 17, 34);
-    p.text(`${state.saves} saves`, 9.2, rgba(k.text, 1), 17, 21);
+    p.text("THIS SESSION", 6, rgba(k.dim, 1), 17, 27);
+    p.text(`${state.saves} saves`, 9.2, rgba(k.text, 1), 17, 16);
 
     // the page
     p.text(TABS[state.tab], 12.8, rgba(k.text, 1), L, H - HEADER - 19);
@@ -703,7 +717,7 @@
       p.text("Physics 240/s   |   CBF off   |   Memory 12 spots", 6.8, rgba(k.dim, 1), L, 30, "left", CW - 96);
       button("Run check", R - 42, 30, 84, true);
     }
-    else if (state.tab === 1 || state.tab === 2 || state.tab === 4) {
+    else if (state.tab === 1 || state.tab === 2 || state.tab === 4 || state.tab === 5) {
       const options = OPTIONS[state.tab];
       const w = (CW - 8) / 2, rows = Math.ceil(options.length / 2), top = H - HEADER - 60;
       options.forEach((o, i) => {
@@ -711,33 +725,48 @@
         const on = key in state.switches ? state.switches[key] : !!o[1];
         tile(o[0], L + Math.floor(i / rows) * (w + 8), top - (i % rows) * PITCH, w, on, () => (state.switches[key] = !on));
       });
-      if (state.tab === 4) {
-        const names = ["Stats", "Console", "Copy log", "Forget level", "Settings", "Updates"];
-        const bw = (CW - 25) / 6;
-        names.forEach((n, i) => button(n, L + bw / 2 + i * (bw + 5), 30, bw, false));
+      if (state.tab === 5) {
+        const names = ["Profiles", "Report bug", "Stats", "Console", "Copy log", "Forget level", "Settings", "Updates"];
+        const bw = (CW - 18) / 4;
+        names.forEach((n, i) => button(n, L + bw / 2 + (i % 4) * (bw + 6), i < 4 ? 98 : 70, bw, i < 2, 22));
+        p.text("Profiles: save or share your settings. Report bug: copies the log and opens GitHub.", 6.4, rgba(k.dim, 1), L, 30, "left", CW);
       }
     }
     else if (state.tab === 3) {
+      // the sliders set frames, or each mode's save rate (v3.8)
+      const rates = !!state.rateView;
+      ["Frames", "Save rate"].forEach((name, i) => {
+        const vw = 56, x = R - vw - (1 - i) * (vw + 4), active = (i === 1) === rates;
+        if (active) p.rect(x, H - HEADER - 25, vw, 16, 5, rgba(t.main, 1));
+        else p.rect(x, H - HEADER - 25, vw, 16, 5, rgba(WHITE, 0.05), 0.5, rgba(WHITE, 0.09));
+        p.text(name, 7.6, rgba(active ? WHITE : k.muted, 1), x + vw / 2, H - HEADER - 16.5, "center", vw - 6);
+        hit(x, H - HEADER - 25, vw, 16, () => (state.rateView = i === 1));
+      });
       let y = H - HEADER - 60;
-      tile("Use per-mode frames", L, y, CW, state.perMode, () => (state.perMode = !state.perMode));
+      const lit = rates ? !!state.perModeRate : state.perMode;
+      tile(rates ? "Use per-mode save rates" : "Use per-mode frames", L, y, CW, lit, () => {
+        if (rates) state.perModeRate = !state.perModeRate;
+        else state.perMode = !state.perMode;
+      });
       y -= 32;
       const w = (CW - 8) / 2;
-      const values = [4, 2, 4, 3, 2, 4, 3, 3];
+      const values = rates ? [100, 80, 100, 90, 60, 100, 85, 90] : [4, 2, 4, 3, 2, 4, 3, 3];
       MODE_NAMES.forEach((name, i) => {
         const x = L + Math.floor(i / 4) * (w + 8), ry = y - (i % 4) * PITCH;
         p.rect(x, ry - TILE_H / 2, w, TILE_H, 6, rgba(WHITE, 0.035), 0.5, rgba(WHITE, 0.07));
         p.rect(x + 7, ry - 6, 12, 12, 3, rgba(t.main, 0.35), 0.5, rgba(t.soft, 0.6));
         p.text(name[0], 7, rgba(k.text, 1), x + 13, ry + 0.3, "center");
-        const x0 = x + 30, x1 = x + w - 36, frac = values[i] / 10;
+        const x0 = x + 30, x1 = x + w - 36, frac = values[i] / (rates ? 100 : 10);
         const kx = x0 + (x1 - x0) * frac;
         p.rect(x0, ry - 1.5, x1 - x0, 3, 1.5, rgba(WHITE, 0.1));
-        p.rect(x0, ry - 1.5, kx - x0, 3, 1.5, state.perMode ? rgba(t.main, 1) : rgba(k.muted, 0.5));
-        p.circle(kx, ry, 5, rgba(WHITE, state.perMode ? 1 : 0.7), 0.6, state.perMode ? rgba(t.main, 1) : rgba(k.muted, 0.6));
-        p.text(`${values[i]}f`, 8.4, rgba(t.soft, 1), x + w - 17, ry + 0.5, "center");
+        p.rect(x0, ry - 1.5, kx - x0, 3, 1.5, lit ? rgba(t.main, 1) : rgba(k.muted, 0.5));
+        p.circle(kx, ry, 5, rgba(WHITE, lit ? 1 : 0.7), 0.6, lit ? rgba(t.main, 1) : rgba(k.muted, 0.6));
+        p.text(rates ? `${values[i]}%` : `${values[i]}f`, rates ? 7.4 : 8.4, rgba(t.soft, 1), x + w - 17, ry + 0.5, "center");
       });
-      p.text("Drag a slider: half-frame steps, up to 10 frames. Low latency's 1-frame limit doesn't apply here.", 6.4, rgba(k.dim, 1), L, 30, "left", CW);
+      p.text(rates ? "Each mode's chance that a save goes ahead, in 5% steps. Off: the save rate in the Buffer tab counts everywhere."
+        : "Drag a slider: half-frame steps, up to 10 frames. Low latency's 1-frame limit doesn't apply here.", 6.4, rgba(k.dim, 1), L, 30, "left", CW);
     }
-    else if (state.tab === 5) {
+    else if (state.tab === TAB_THEMES) {
       const cw = (CW - 12) / 3, ch = 46;
       let y = H - HEADER - 46;
       GROUPS.forEach((group, gi) => {
