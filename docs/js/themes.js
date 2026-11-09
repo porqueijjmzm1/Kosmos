@@ -606,7 +606,8 @@
     p.text("Kosmos", 12, rgba(k.text, 1), 40, cy + 5);
     p.text(state.version || "v3.5.0", 6.8, rgba(k.dim, 1), 40, cy - 7.5);
     // the status pill and the close button
-    const pill = state.stage === 7 ? "OFF" : `ON  |  ${STAGE_CHIPS[state.stage]}`;
+    let pill = state.stage === 7 ? "OFF" : `ON  |  ${STAGE_CHIPS[state.stage]}`;
+    if (state.stage !== 7 && state.saveRate < 100) pill += `  |  ${state.saveRate}%`;
     const pw = p.measure(pill, 8.4) + 22, right = W - 40;
     const dotColor = state.stage === 7 ? [240, 92, 104] : good;
     p.rect(right - pw, cy - 9, pw, 18, 9, rgba(dotColor, 0.1), 0.5, rgba(dotColor, 0.45));
@@ -680,11 +681,25 @@
         hit(x, y - 15, pw, 30, () => (state.stage = [2, 3, 5][i]));
       });
       y -= 40;
-      p.rect(L, y - TILE_H / 2, CW, TILE_H, 6, rgba(WHITE, 0.035), 0.5, rgba(WHITE, 0.07));
-      p.text("Physics TPS", 9.2, rgba(k.text, 1), L + 9, y + 0.5);
-      button("-", R - 70, y, 18, false, 18);
-      button("+", R - 14, y, 18, false, 18);
-      p.text("240", 9.2, rgba(t.soft, 1), R - 42, y + 0.5, "center");
+      // two half cards: the physics TPS, and the save rate's slider (v3.7)
+      const half = (CW - 8) / 2, tpsRight = L + half, rateLeft = tpsRight + 8;
+      p.rect(L, y - TILE_H / 2, half, TILE_H, 6, rgba(WHITE, 0.035), 0.5, rgba(WHITE, 0.07));
+      p.text("Physics TPS", 8.4, rgba(k.text, 1), L + 8, y + 0.5, "left", half - 92);
+      button("-", tpsRight - 64, y, 18, false, 18);
+      button("+", tpsRight - 12, y, 18, false, 18);
+      p.text("240", 8.8, rgba(t.soft, 1), tpsRight - 38, y + 0.5, "center");
+      p.rect(rateLeft, y - TILE_H / 2, half, TILE_H, 6, rgba(WHITE, 0.035), 0.5, rgba(WHITE, 0.07));
+      p.text("Save rate", 8.4, rgba(k.text, 1), rateLeft + 8, y + 0.5, "left", 40);
+      const x0 = rateLeft + 54, x1 = rateLeft + half - 38, kx = x0 + ((x1 - x0) * state.saveRate) / 100;
+      p.rect(x0, y - 1.5, x1 - x0, 3, 1.5, rgba(WHITE, 0.1));
+      if (kx - x0 > 1) p.rect(x0, y - 1.5, kx - x0, 3, 1.5, rgba(t.main, 1));
+      p.circle(kx, y, 5, rgba(WHITE, 1), 0.6, rgba(t.main, 1));
+      p.text(`${state.saveRate}%`, 8.4, rgba(t.soft, 1), rateLeft + half - 18, y + 0.5, "center");
+      // a tap on the track sets the rate there, in 5% steps
+      hit(x0 - 8, y - 11, x1 - x0 + 16, 22, () => {
+        const f = clamp(((state.pointer ? state.pointer[0] : kx) - x0) / (x1 - x0), 0, 1);
+        state.saveRate = Math.round(f * 20) * 5;
+      });
       p.text("Physics 240/s   |   CBF off   |   Memory 12 spots", 6.8, rgba(k.dim, 1), L, 30, "left", CW - 96);
       button("Run check", R - 42, 30, 84, true);
     }

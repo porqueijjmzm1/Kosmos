@@ -7,7 +7,7 @@ from pathlib import Path
 
 GROUPS = [
     ("Buffer", "How much an early click can be held back, and when.",
-     ["practice-only", "low-latency", "custom-ticks", "custom-wave-ticks", "per-level-settings", "cbf-sync"]),
+     ["practice-only", "save-rate", "low-latency", "custom-ticks", "custom-wave-ticks", "per-level-settings", "cbf-sync"]),
     ("Prediction", "What the hidden ghost checks before a click goes through.",
      ["smart-prediction", "robust-saves", "full-ghost-state", "plan-next-click", "predict-through-portals",
       "predict-move-triggers", "predict-moving-objects", "avoid-moving-objects", "ignore-touching-hazards",

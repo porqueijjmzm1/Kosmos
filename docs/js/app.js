@@ -28,7 +28,7 @@
   // ---------- the picked theme ----------
 
   let theme = Math.max(0, K.THEMES.findIndex((t) => t.name === store.get("kosmos-theme")));
-  const menuState = { tab: 0, stage: 2, theme, saves: 12, switches: {}, perMode: false, version: DATA.version, hits: [], onTheme: (i) => pickTheme(i) };
+  const menuState = { tab: 0, stage: 2, theme, saves: 12, saveRate: 100, pointer: null, switches: {}, perMode: false, version: DATA.version, hits: [], onTheme: (i) => pickTheme(i) };
 
   function applyThemeColours() {
     const t = K.THEMES[theme];
@@ -141,6 +141,7 @@
   menuCanvas.addEventListener("click", (e) => {
     const h = menuHit(e);
     if (h) {
+      menuState.pointer = menuPoint(e);  // where the tap was, for the save rate's slider
       h.action();
       menu.render(now());
     }

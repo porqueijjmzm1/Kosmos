@@ -22,6 +22,14 @@ window.KOSMOS_DATA = {
      "choices": []
     },
     {
+     "key": "save-rate",
+     "name": "Save rate (%)",
+     "type": "int",
+     "default": "100",
+     "about": "The chance that each save goes ahead. At 100% every click the buffer can save is saved; at 50% only about half of them, and the rest go through as you clicked them, as if the buffer were off. Applies to every kind of save (normal, orb alignment, more time at death spots). Also a slider in the menu's Buffer tab.",
+     "choices": []
+    },
+    {
      "key": "low-latency",
      "name": "Low latency mode",
      "type": "bool",

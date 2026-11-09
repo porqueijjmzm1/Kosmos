@@ -33,6 +33,7 @@
 #include <map>
 #include <functional>
 #include <optional>
+#include <random>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/RingObject.hpp>
 #ifdef GEODE_IS_WINDOWS
@@ -3660,6 +3661,29 @@ namespace {
         }
     }
 
+    // v3.7 save rate: the chance (0-100%) that a save goes ahead. Read when it's needed, so a
+    // change in the menu or the settings counts at once.
+    int saveRate() {
+        return static_cast<int>(std::clamp<int64_t>(Mod::get()->getSettingValue<int64_t>("save-rate"), 0, 100));
+    }
+
+    std::mt19937 saveDice { std::random_device {}() };
+
+    // Rolls for a save the buffer found. False: it isn't used, and the input goes through as
+    // you made it (as if the buffer were off for this one).
+    bool saveRolls(int ticks, bool down, char const* what) {
+        int rate = saveRate();
+        if (rate >= 100) {
+            return true;
+        }
+        int roll = std::uniform_int_distribution<int>(1, 100)(saveDice);
+        if (roll <= rate) {
+            return true;
+        }
+        say("NOT SAVED {}{} +{}t ({:g}f): save rate {}% (rolled {})", what, down ? "press" : "release", ticks, ticks * TICK, rate, roll);
+        return false;
+    }
+
     std::string attemptSummary() {
         auto const& a = attemptStats;
         return fmt::format("{} {} | avg {:.1f}t ({:.2f}f) early", a.saves, buf.train ? (a.saves == 1 ? "early click" : "early clicks")
@@ -4307,6 +4331,11 @@ namespace {
                 buf.appliedInput = down;
                 return false;
             }
+            if (k > 0 && !saveRolls(k, down, "orb ")) {
+                decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
+                buf.appliedInput = down;
+                return false;
+            }
             if (k > 0) {
                 // v2.80.1: says so when it isn't a full save (the orb is used, but a crash still follows)
                 say("ORB {} +{}t ({:g}f) -> {}t{}", buf.orbWasTiming ? "timing" : "press", k, k * TICK, orbLanded,
@@ -4428,7 +4457,7 @@ namespace {
                         bestCrash = crashAt;
                     }
                 }
-                if (bestK > 0 && !buf.train) {
+                if (bestK > 0 && !buf.train && saveRolls(bestK, down, "more time ")) {
                     noteSave(layer, bestK);
                     say("MORE TIME {}{} +{}t: crash t{} -> {} (died here {}x)", down ? "press" : "release", tickTag, bestK, crash0,
                         bestCrash < 0 ? std::string("none") : fmt::format("t{}", bestCrash), spotAround(sliceOf(p1)).deaths);
@@ -4617,6 +4646,11 @@ namespace {
         }
 
         if (trainInstead(layer, saved, down, swingPress ? "swing" : "")) {
+            decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
+            buf.appliedInput = down;
+            return false;
+        }
+        if (!saveRolls(saved, down, swingPress ? "swing " : "")) {
             decided(layer, p1, p2, dual, 0, down, horizon, releaseAfter);
             buf.appliedInput = down;
             return false;
@@ -5609,6 +5643,7 @@ private:
     CCLabelBMFont* m_stage = nullptr;
     CCLabelBMFont* m_status = nullptr;
     CCLabelBMFont* m_tpsLabel = nullptr;
+    CCLabelBMFont* m_saveRateLabel = nullptr;
     CCLabelBMFont* m_saves = nullptr;
     CCLabelBMFont* m_pillLabel = nullptr;
     CCDrawNode* m_pill = nullptr;
@@ -5624,8 +5659,9 @@ private:
     Tile m_perModeTile { nullptr, nullptr, {} };
 
     std::array<CCLabelBMFont*, 8> m_modeValues {};
+    static constexpr int SAVE_RATE_SLIDER = -1;  // v3.7: the save rate's slider, in the Buffer tab
     struct ModeSlider {
-        int mode;
+        int mode;                                // a game mode (MODE_NAMES), or SAVE_RATE_SLIDER
         float x0, x1, y;  // in the page's space
         CCDrawNode* draw;
     };
@@ -5832,6 +5868,9 @@ private:
         if (buf.enabled && buf.train) {
             text += "  |  training";
         }
+        if (buf.enabled && saveRate() < 100) {
+            text += fmt::format("  |  {}%", saveRate());  // v3.7: only some saves go ahead
+        }
         m_pillLabel->setString(text.c_str());
         m_pillLabel->limitLabelWidth(120.f, 0.42f, 0.2f);
         float w = m_pillLabel->getScaledContentSize().width + 22.f;
@@ -5958,11 +5997,21 @@ private:
         }
 
         y -= 40.f;
-        card({ L, y - TILE_H / 2.f, CW, TILE_H });
-        label(m_page, "Physics TPS", 0.46f, m_text, { L + 9.f, y + 0.5f }, { 0.f, 0.5f });
-        button(m_pageMenu, "-", menu_selector(BufferMenu::onTps), { R - 70.f, y }, 18.f, false, -1, 18.f);
-        button(m_pageMenu, "+", menu_selector(BufferMenu::onTps), { R - 14.f, y }, 18.f, false, 1, 18.f);
-        m_tpsLabel = label(m_page, "", 0.46f, m_t.soft, { R - 42.f, y + 0.5f });
+        // v3.7: two half cards: the physics TPS, and the save rate's slider
+        float half = (CW - 8.f) / 2.f;
+        float tpsRight = L + half;
+        card({ L, y - TILE_H / 2.f, half, TILE_H });
+        label(m_page, "Physics TPS", 0.42f, m_text, { L + 8.f, y + 0.5f }, { 0.f, 0.5f })->limitLabelWidth(half - 92.f, 0.42f, 0.2f);
+        button(m_pageMenu, "-", menu_selector(BufferMenu::onTps), { tpsRight - 64.f, y }, 18.f, false, -1, 18.f);
+        button(m_pageMenu, "+", menu_selector(BufferMenu::onTps), { tpsRight - 12.f, y }, 18.f, false, 1, 18.f);
+        m_tpsLabel = label(m_page, "", 0.44f, m_t.soft, { tpsRight - 38.f, y + 0.5f });
+        float rateLeft = tpsRight + 8.f;
+        card({ rateLeft, y - TILE_H / 2.f, half, TILE_H });
+        label(m_page, "Save rate", 0.42f, m_text, { rateLeft + 8.f, y + 0.5f }, { 0.f, 0.5f })->limitLabelWidth(40.f, 0.42f, 0.2f);
+        auto* rateTrack = CCDrawNode::create();
+        m_page->addChild(rateTrack, 2);
+        m_sliders.push_back({ SAVE_RATE_SLIDER, rateLeft + 54.f, rateLeft + half - 38.f, y, rateTrack });
+        m_saveRateLabel = label(m_page, "", 0.42f, m_t.soft, { rateLeft + half - 18.f, y + 0.5f });
 
         m_status = label(m_page, "", 0.34f, m_dim, { L, 30.f }, { 0.f, 0.5f });
         button(m_pageMenu, "Run check", menu_selector(BufferMenu::onRunCheck), { R - 42.f, 30.f }, 84.f, true);
@@ -6069,7 +6118,7 @@ private:
         if (m_page) {
             m_page->removeFromParent();
         }
-        m_stage = m_status = m_tpsLabel = nullptr;
+        m_stage = m_status = m_tpsLabel = m_saveRateLabel = nullptr;
         m_perModeTile = { nullptr, nullptr, {} };
         m_modeValues.fill(nullptr);
         m_sliders.clear();
@@ -6122,18 +6171,30 @@ private:
     void drawSlider(ModeSlider const& sl) {
         auto* d = sl.draw;
         d->clear();
-        float t = static_cast<float>(buf.modeTicks[sl.mode]) / MODE_TICKS_MAX;
+        bool rate = sl.mode == SAVE_RATE_SLIDER;
+        float t = rate ? saveRate() / 100.f : static_cast<float>(buf.modeTicks[sl.mode]) / MODE_TICKS_MAX;
+        bool on = rate || buf.perMode;  // the save rate always counts; mode frames only when per mode is on
         float kx = sl.x0 + (sl.x1 - sl.x0) * t;
         roundRect(d, { sl.x0, sl.y - 1.5f, sl.x1 - sl.x0, 3.f }, 1.5f, white(0.1f));
         if (kx - sl.x0 > 1.f) {
-            roundRect(d, { sl.x0, sl.y - 1.5f, kx - sl.x0, 3.f }, 1.5f, buf.perMode ? col(m_t.main, 1.f) : col(m_muted, 0.5f));
+            roundRect(d, { sl.x0, sl.y - 1.5f, kx - sl.x0, 3.f }, 1.5f, on ? col(m_t.main, 1.f) : col(m_muted, 0.5f));
         }
-        circle(d, { kx, sl.y }, 5.f, white(buf.perMode ? 1.f : 0.7f), 24, 0.6f, buf.perMode ? col(m_t.main, 1.f) : col(m_muted, 0.6f));
+        circle(d, { kx, sl.y }, 5.f, white(on ? 1.f : 0.7f), 24, 0.6f, on ? col(m_t.main, 1.f) : col(m_muted, 0.6f));
     }
 
-    // a touch on a slider sets its mode's frames (snapped to half frames)
+    // a touch on a slider sets its mode's frames (snapped to half frames), or the save rate
+    // (in 5% steps)
     void slideTo(ModeSlider const& sl, CCPoint p) {
         float t = std::clamp((p.x - sl.x0) / (sl.x1 - sl.x0), 0.f, 1.f);
+        if (sl.mode == SAVE_RATE_SLIDER) {
+            int rate = static_cast<int>(std::lround(t * 20.f)) * 5;
+            if (rate != saveRate()) {
+                Mod::get()->setSettingValue<int64_t>("save-rate", rate);
+                refreshModes();
+                refreshHeader();
+            }
+            return;
+        }
         int ticks = static_cast<int>(std::lround(t * MODE_TICKS_MAX / 2.f)) * 2;
         if (ticks != buf.modeTicks[sl.mode]) {
             buf.modeTicks[sl.mode] = ticks;
@@ -6153,6 +6214,9 @@ private:
         }
         if (m_perModeTile.draw) {
             drawTile(m_perModeTile, buf.perMode);
+        }
+        if (m_saveRateLabel) {
+            m_saveRateLabel->setString(fmt::format("{}%", saveRate()).c_str());
         }
     }
 
@@ -6206,6 +6270,10 @@ private:
         if (m_dragSlider >= 0) {
             int mode = m_sliders[m_dragSlider].mode;
             m_dragSlider = -1;
+            if (mode == SAVE_RATE_SLIDER) {
+                say("save rate: {}%", saveRate());
+                return;
+            }
             saveModeTicks();
             say("{}: {:g} frames", MODE_NAMES[mode], buf.modeTicks[mode] * TICK);
             return;
