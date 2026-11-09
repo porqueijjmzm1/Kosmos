@@ -33,12 +33,25 @@ jobs:
     runs-on: ${{ matrix.config.os }}
     steps:
       - uses: actions/checkout@v4
+      # Geode's bindings and code generator now follow Geode 6 (GD 2.2091). Kosmos is a Geode
+      # 5.11 mod for GD 2.2081, so it builds with the SDK from mod.json, the bindings as they
+      # were for 5.11 (the day after v3.6.0 built) and a code generator built from them.
+      - name: Bindings for Geode 5.11
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/geode-bindings"
+          git clone -q --filter=blob:none https://github.com/geode-sdk/bindings "$dir"
+          rev=$(git -C "$dir" rev-list -n 1 --before="2026-11-02T00:00:00Z" HEAD)
+          git -C "$dir" checkout -q "$rev"
+          echo "bindings at $rev"
+          echo "GEODE_BINDINGS_REPO_PATH=$dir" >> "$GITHUB_ENV"
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
         with:
-          sdk: stable
+          sdk: given
           combine: true
           target: ${{ matrix.config.target }}
+          configure-args: -DSKIP_BUILDING_CODEGEN=OFF
   package:
     name: Package builds
     runs-on: ubuntu-latest
