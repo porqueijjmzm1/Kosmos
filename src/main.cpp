@@ -2581,6 +2581,21 @@ namespace {
 
     enum class SimEnd { Ok, StopSearch };
 
+    // a ghost's particles (orb burst, dash fire...) stop. GD 2.2091's PlayerObject::stopParticles
+    // has no iOS address in Geode's bindings yet, so there each particle system is stopped itself.
+    void stopGhostParticles(PlayerObject* p) {
+#ifdef GEODE_IS_IOS
+        for (auto* particles : { p->m_playerGroundParticles, p->m_trailingParticles, p->m_shipClickParticles, p->m_vehicleGroundParticles,
+                 p->m_ufoClickParticles, p->m_robotBurstParticles, p->m_dashParticles, p->m_swingBurstParticles1, p->m_swingBurstParticles2 }) {
+            if (particles) {
+                particles->stopSystem();
+            }
+        }
+#else
+        p->stopParticles();
+#endif
+    }
+
     // Returns ticks survived after the input (horizon = fully safe).
     // releaseAfter: ticks after the input at which the ghost does the opposite (-1 = never).
     // stopAt: stop as soon as this many ticks were survived (the caller already knows
@@ -2809,9 +2824,9 @@ namespace {
         // v2.78.3: a ghost that used an orb or dashed started its particles (orb burst, dash
         // fire) right where the orb is, before you got there
         if (buf.firstOrbTick >= 0) {
-            buf.ghost1->stopParticles();
+            stopGhostParticles(buf.ghost1);
             if (buf.ghost2) {
-                buf.ghost2->stopParticles();
+                stopGhostParticles(buf.ghost2);
             }
         }
         buf.lastRunSwitched = buf.ghostSwitched;
