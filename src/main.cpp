@@ -1169,13 +1169,12 @@ namespace {
         ghost->m_affectedByForces = real->m_affectedByForces;
         ghost->m_stateBoostX = real->m_stateBoostX;
         ghost->m_stateBoostY = real->m_stateBoostY;
-        ghost->m_stateNoStickX = real->m_stateNoStickX;
-        ghost->m_stateNoStickY = real->m_stateNoStickY;
+        // (GD 2.2091 dropped the player's no-stick states)
         ghost->m_stateHitHead = real->m_stateHitHead;
         ghost->m_stateFlipGravity = real->m_stateFlipGravity;
         ghost->m_stateNoAutoJump = real->m_stateNoAutoJump;
         ghost->m_stateScale = real->m_stateScale;
-        ghost->m_maybeStateForce2 = real->m_maybeStateForce2;
+        ghost->m_stateNoWallPush = real->m_stateNoWallPush;  // m_maybeStateForce2 before GD 2.2091
     }
 
     // Your recent input timings, so predictions model what you actually do instead of
@@ -7538,8 +7537,8 @@ class $modify(BufPlayLayer, PlayLayer) {
         finishDrift(" (died)");
     }
 
-    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
-        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) {
+    bool init(GJGameLevel* level, bool dontCreateObjects) {  // GD 2.2091 dropped useReplay
+        if (!PlayLayer::init(level, dontCreateObjects)) {
             return false;
         }
         dropGhosts();
@@ -7845,7 +7844,7 @@ class $modify(BufEffectGameObject, EffectGameObject) {
         (void)self.setHookPriority("EffectGameObject::triggerObject", HOOK_PRIORITY);
     }
 
-    void triggerObject(GJBaseGameLayer* layer, int uniqueID, gd::vector<int> const* remapKeys) {
+    void triggerObject(GJBaseGameLayer* layer, int uniqueID, std::vector<int> const* remapKeys) {
         if (buf.simulating) {
             return;
         }
@@ -8839,12 +8838,12 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         return GJBaseGameLayer::canBeActivatedByPlayer(player, object);
     }
 
-    void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* objects, int objectCount, float dt) {
+    void collisionCheckObjects(PlayerObject* player, std::vector<GameObject*>* objects, int objectCount, float dt) {
         if (!buf.simulating) {
             GJBaseGameLayer::collisionCheckObjects(player, objects, objectCount, dt);
             return;
         }
-        static gd::vector<GameObject*> relevant;
+        static std::vector<GameObject*> relevant;
         relevant.clear();
         if (static_cast<int>(relevant.capacity()) < objectCount) {
             relevant.reserve(objectCount);
@@ -9058,7 +9057,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     // Toggle orbs, orbs / pads / collectibles with groups, item and counter triggers could
     // otherwise toggle or spawn groups and change item counters for real (once per
     // prediction run, many times a click), which broke triggers in some levels.
-    void toggleGroupTriggered(int group, bool activate, gd::vector<int> const& remapKeys, int triggerID, int controlID) {
+    void toggleGroupTriggered(int group, bool activate, std::vector<int> const& remapKeys, int triggerID, int controlID) {
         if (buf.simulating) {
             // v2.75: a toggle orb that switches a group off: the ghost stops colliding with
             // that group for the rest of this prediction (the real objects aren't touched)
@@ -9071,7 +9070,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::toggleGroupTriggered(group, activate, remapKeys, triggerID, controlID);
     }
 
-    void spawnGroup(int group, bool ordered, double delay, gd::vector<int> const& remapKeys, int triggerID, int controlID) {
+    void spawnGroup(int group, bool ordered, double delay, std::vector<int> const& remapKeys, int triggerID, int controlID) {
         if (buf.simulating) {
             return;
         }
@@ -9111,7 +9110,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::activateItemEditTrigger(object);
     }
 
-    void activateItemCompareTrigger(ItemTriggerGameObject* object, gd::vector<int> const& remapKeys) {
+    void activateItemCompareTrigger(ItemTriggerGameObject* object, std::vector<int> const& remapKeys) {
         if (buf.simulating) {
             return;
         }
