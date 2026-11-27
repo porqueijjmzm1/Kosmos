@@ -8050,9 +8050,11 @@ class $modify(BufPlayerObject, PlayerObject) {
         if (!ghostEffect()) PlayerObject::fadeOutStreak2(duration);
     }
 
+#ifndef GEODE_IS_IOS  // GD 2.2091 has no iOS address for it in Geode's bindings (yet)
     void playDynamicSpiderRun() {
         if (!ghostEffect()) PlayerObject::playDynamicSpiderRun();
     }
+#endif
 
     void animatePlatformerJump(float scale) {
         if (!ghostEffect()) PlayerObject::animatePlatformerJump(scale);
