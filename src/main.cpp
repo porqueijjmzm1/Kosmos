@@ -615,7 +615,16 @@ namespace {
     }
 
     void readModeTicks();
-    void refreshOverlays();  // v3.8: the timing meter, the save map and the floating button follow their settings
+    void refreshOverlays();
+
+    // v4.0: Geode 6 gives asp::fs paths; the file code here works with std::filesystem
+    std::filesystem::path stdPath(asp::fs::PathView path) {
+        return std::filesystem::path(path.native());
+    }
+
+    std::filesystem::path saveDir() {
+        return stdPath(Mod::get()->getSaveDir());
+    }  // v3.8: the timing meter, the save map and the floating button follow their settings
 
     void readSettings() {
         auto* mod = Mod::get();
@@ -887,8 +896,8 @@ namespace {
 
         bool copied = geode::utils::clipboard::write(text);
         std::error_code ec;
-        std::filesystem::create_directories(mod->getSaveDir(), ec);
-        std::ofstream(mod->getSaveDir() / "console-export.txt", std::ios::trunc) << text;
+        std::filesystem::create_directories(saveDir(), ec);
+        std::ofstream(saveDir() / "console-export.txt", std::ios::trunc) << text;
         say("console {} ({} lines) + saved to console-export.txt", copied ? "copied to clipboard" : "NOT copied", exportLines.size());
     }
 
@@ -2271,7 +2280,7 @@ namespace {
     std::filesystem::path memoryFile() {
         // v2.37: slices keyed by the real position. v2.75: _v3, a fresh start after the
         // prediction fixes of v2.61-v2.74 (old files learned from the buggy versions)
-        return Mod::get()->getSaveDir() / "memory" / (memoryKey + "_v3.txt");
+        return saveDir() / "memory" / (memoryKey + "_v3.txt");
     }
 
     size_t memorySpots() {
@@ -3991,7 +4000,7 @@ namespace {
     std::string lastBench;        // last result, for the stats popup
 
     std::filesystem::path benchFile() {
-        return Mod::get()->getSaveDir() / "bench" / (memoryKey + ".txt");
+        return saveDir() / "bench" / (memoryKey + ".txt");
     }
 
     size_t benchSavedTicks() {
@@ -4158,8 +4167,8 @@ namespace {
         say("run check: {} | max error {:.1f}u{} | {:.0f} ms", lastBench, maxErr,
             std::abs(r.dt - buf.tickLength) > 1e-4f ? " | recorded at another frame rate" : "", ms);
         std::error_code ec;
-        std::filesystem::create_directories(Mod::get()->getSaveDir(), ec);
-        std::ofstream(Mod::get()->getSaveDir() / "run-check-results.txt", std::ios::app)
+        std::filesystem::create_directories(saveDir(), ec);
+        std::ofstream(saveDir() / "run-check-results.txt", std::ios::app)
             << Mod::get()->getVersion().toVString() << ' ' << memoryKey << ": " << lastBench << '\n';
     }
 
@@ -7272,19 +7281,20 @@ static void migrateOldSave() {
         return;
     }
     mod->setSavedValue("migrated-v3", true);
-    auto oldDir = dirs::getModsSaveDir() / "basu.input-buffer";
+    auto oldGeodeDir = dirs::getModsSaveDir() / "basu.input-buffer";
+    auto oldDir = stdPath(oldGeodeDir);
     std::error_code ec;
     if (!std::filesystem::is_directory(oldDir, ec)) {
         return;
     }
-    if (auto json = file::readJson(oldDir / "settings.json"); json.isOk() && json.unwrap().isObject()) {
+    if (auto json = file::readJson(oldGeodeDir / "settings.json"); json.isOk() && json.unwrap().isObject()) {
         for (auto const& [key, value] : json.unwrap()) {
             if (auto setting = mod->getSetting(key)) {
                 setting->load(value);
             }
         }
     }
-    if (auto json = file::readJson(oldDir / "saved.json"); json.isOk() && json.unwrap().isObject()) {
+    if (auto json = file::readJson(oldGeodeDir / "saved.json"); json.isOk() && json.unwrap().isObject()) {
         auto& saved = mod->getSaveContainer();
         for (auto const& [key, value] : json.unwrap()) {
             if (!saved.contains(key)) {
@@ -7292,7 +7302,7 @@ static void migrateOldSave() {
             }
         }
     }
-    auto newDir = mod->getSaveDir();
+    auto newDir = saveDir();
     int copied = 0;
     for (auto it = std::filesystem::recursive_directory_iterator(oldDir, ec); !ec && it != std::filesystem::recursive_directory_iterator();
         it.increment(ec)) {
@@ -8284,6 +8294,20 @@ namespace {
         if (info["id"].asString().unwrapOr("") != Mod::get()->getID()) {
             return Err("the download is a different mod");
         }
+        // v4.0: only a build for this game version and this Geode installs; any other wouldn't
+        // load, which would just leave you without the mod
+        auto gd = info["gd"];
+        std::string wantGd = gd.isObject() ? gd[GEODE_PLATFORM_SHORT_IDENTIFIER_NOARCH].asString().unwrapOr("") : gd.asString().unwrapOr("");
+        std::string haveGd = Loader::get()->getGameVersion();
+        if (!wantGd.empty() && wantGd != "*" && wantGd != haveGd) {
+            return Err(fmt::format("that version is for Geometry Dash {} and you have {}", wantGd, haveGd));
+        }
+        if (auto wantGeode = VersionInfo::parse(info["geode"].asString().unwrapOr("")); wantGeode.isOk()) {
+            auto haveGeode = Loader::get()->getVersion();
+            if (wantGeode.unwrap().getMajor() != haveGeode.getMajor()) {
+                return Err(fmt::format("that version needs Geode {} and you have {}", wantGeode.unwrap().toVString(), haveGeode.toVString()));
+            }
+        }
         GEODE_UNWRAP_INTO(auto version, info["version"].asString());
         return VersionInfo::parse(version);
     }
@@ -8307,7 +8331,7 @@ namespace {
                 });
             };
             auto file = web::WebRequest()
-                .timeout(std::chrono::seconds(120))
+                .timeout(asp::Duration::fromSecs(120))
                 .userAgent("Kosmos")
                 .followRedirects(true)
                 .onProgress([](web::WebProgress const& progress) {
@@ -8641,7 +8665,7 @@ namespace {
                 });
             };
             auto res = web::WebRequest()
-                .timeout(std::chrono::seconds(15))
+                .timeout(asp::Duration::fromSecs(15))
                 .userAgent("Kosmos")
                 .header("Accept", "application/vnd.github+json")
                 .getSync(fmt::format("https://api.github.com/repos/{}/releases/latest", UPDATE_REPO));
